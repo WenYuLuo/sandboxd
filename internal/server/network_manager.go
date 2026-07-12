@@ -1,0 +1,201 @@
+// Copyright (c) 2026 Ant Group Corporation.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package server
+
+import (
+	"fmt"
+	"strconv"
+	"strings"
+	"sync"
+
+	"github.com/akernel-dev/sandboxd/config"
+	"github.com/akernel-dev/sandboxd/pkg/networkmanager"
+	"github.com/sirupsen/logrus"
+)
+
+type dnatRule struct {
+	Protocol   string
+	DstPort    uint16
+	TargetIP   string
+	TargetPort uint16
+	SandboxID  string
+}
+
+type networkManager struct {
+	iface      *networkmanager.InterfaceManager
+	natBackend string
+
+	dnatMu    sync.Mutex
+	dnatRules map[string][]*dnatRule
+}
+
+type preparedNetwork struct {
+	resource string
+	ip       string
+}
+
+func resolveNATBackend(name string) (string, error) {
+	if name == "" {
+		name = config.NatBackendIptables
+	}
+	if _, ok := networkmanager.NetworkManagers[name]; !ok {
+		return "", fmt.Errorf("unsupported NAT backend %q", name)
+	}
+	return name, nil
+}
+
+func newNetworkManager(iface *networkmanager.InterfaceManager, natBackend string) *networkManager {
+	return &networkManager{
+		iface:      iface,
+		natBackend: natBackend,
+		dnatRules:  make(map[string][]*dnatRule),
+	}
+}
+
+func (m *networkManager) Prepare() (*preparedNetwork, error) {
+	if m.iface == nil {
+		return nil, fmt.Errorf("interface manager not configured")
+	}
+	resource, err := m.iface.Allocate()
+	if err != nil {
+		return nil, err
+	}
+	netResource := &networkmanager.NetResource{}
+	if err := netResource.FromString(resource); err != nil {
+		if recycleErr := m.iface.Recycle(resource); recycleErr != nil {
+			logrus.Warnf("recycle malformed network resource %q failed: %v", resource, recycleErr)
+		}
+		return nil, fmt.Errorf("parse net device(%s) failed, err: %v", resource, err)
+	}
+	return &preparedNetwork{resource: resource, ip: netResource.Ip.String()}, nil
+}
+
+func (m *networkManager) Release(resource string) error {
+	if resource == "" {
+		return nil
+	}
+	if m.iface == nil {
+		return fmt.Errorf("interface manager not configured")
+	}
+	return m.iface.Recycle(resource)
+}
+
+func (m *networkManager) setupDnatRules(sandboxID string, ports []string, targetIP string) error {
+	if len(ports) == 0 {
+		return nil
+	}
+
+	nat, ok := networkmanager.NetworkManagers[m.natBackend]
+	if !ok {
+		return fmt.Errorf("network manager not found for type: %s", m.natBackend)
+	}
+
+	rules := make([]*dnatRule, 0, len(ports))
+	for _, port := range ports {
+		rule, err := parseDnatRule(sandboxID, port, targetIP)
+		if err != nil {
+			return err
+		}
+
+		if err := nat.SetupDNATRule(rule.Protocol, rule.DstPort, rule.TargetIP, rule.TargetPort); err != nil {
+			for i := len(rules) - 1; i >= 0; i-- {
+				prev := rules[i]
+				if cleanupErr := nat.CleanupDNATRule(prev.Protocol, prev.DstPort, prev.TargetIP, prev.TargetPort); cleanupErr != nil {
+					logrus.Warnf("rollback DNAT rule for %s:%d->%s:%d failed: %v",
+						prev.Protocol, prev.DstPort, prev.TargetIP, prev.TargetPort, cleanupErr)
+				}
+			}
+			return fmt.Errorf("failed to add DNAT rule for %s:%d->%s:%d: %v",
+				rule.Protocol, rule.DstPort, rule.TargetIP, rule.TargetPort, err)
+		}
+
+		logrus.Infof("Added DNAT rule: %s:%d -> %s:%d for sandbox %s",
+			rule.Protocol, rule.DstPort, rule.TargetIP, rule.TargetPort, sandboxID)
+
+		rules = append(rules, rule)
+	}
+
+	m.dnatMu.Lock()
+	m.dnatRules[sandboxID] = rules
+	m.dnatMu.Unlock()
+	return nil
+}
+
+func parseDnatRule(sandboxID, port, targetIP string) (*dnatRule, error) {
+	parts := strings.Split(port, ":")
+	if len(parts) != 3 {
+		return nil, fmt.Errorf("invalid port format: %s, expected format: protocol:dstPort:targetPort", port)
+	}
+
+	protocol := parts[0]
+	dstPort, err := strconv.ParseUint(parts[1], 10, 16)
+	if err != nil {
+		return nil, fmt.Errorf("invalid dstPort: %s, err: %v", parts[1], err)
+	}
+	targetPort, err := strconv.ParseUint(parts[2], 10, 16)
+	if err != nil {
+		return nil, fmt.Errorf("invalid targetPort: %s, err: %v", parts[2], err)
+	}
+
+	return &dnatRule{
+		Protocol:   protocol,
+		DstPort:    uint16(dstPort),
+		TargetIP:   targetIP,
+		TargetPort: uint16(targetPort),
+		SandboxID:  sandboxID,
+	}, nil
+}
+
+func (m *networkManager) cleanupDnatRules(sandboxID string) {
+	m.dnatMu.Lock()
+	rules, ok := m.dnatRules[sandboxID]
+	if !ok {
+		m.dnatMu.Unlock()
+		return
+	}
+	delete(m.dnatRules, sandboxID)
+	m.dnatMu.Unlock()
+
+	nat, ok := networkmanager.NetworkManagers[m.natBackend]
+	for _, rule := range rules {
+		if !ok {
+			logrus.Warnf("network manager not found for type %s, cannot delete DNAT rule %s:%d->%s:%d",
+				m.natBackend, rule.Protocol, rule.DstPort, rule.TargetIP, rule.TargetPort)
+			continue
+		}
+		if err := nat.CleanupDNATRule(rule.Protocol, rule.DstPort, rule.TargetIP, rule.TargetPort); err != nil {
+			logrus.Warnf("failed to delete DNAT rule for %s:%d->%s:%d: %v",
+				rule.Protocol, rule.DstPort, rule.TargetIP, rule.TargetPort, err)
+			continue
+		}
+		logrus.Infof("Deleted DNAT rule: %s:%d -> %s:%d for sandbox %s",
+			rule.Protocol, rule.DstPort, rule.TargetIP, rule.TargetPort, sandboxID)
+	}
+}
+
+func (m *networkManager) rulesFor(sandboxID string) []*dnatRule {
+	m.dnatMu.Lock()
+	defer m.dnatMu.Unlock()
+	rules := m.dnatRules[sandboxID]
+	out := make([]*dnatRule, len(rules))
+	copy(out, rules)
+	return out
+}
+
+func (m *networkManager) ruleCount() int {
+	m.dnatMu.Lock()
+	defer m.dnatMu.Unlock()
+	return len(m.dnatRules)
+}

@@ -1,0 +1,9 @@
+.git
+.cache
+bin
+local
+
+output/*
+!output/sandboxd
+!output/sbox
+!output/runsc
