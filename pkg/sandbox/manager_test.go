@@ -446,6 +446,101 @@ func TestWaitForExit_NotFound(t *testing.T) {
 	assert.True(t, errors.Is(err, errord.ErrNotFound), "want ErrNotFound, got %v", err)
 }
 
+func TestReceiveCreatePublishesExitNotifierBeforeReturn(t *testing.T) {
+	const id = "sbox-create-wait"
+	handlers := cmap.New[svc.Handler]()
+	handlers.Set("runsc", svc.NewFakeRuntimeHandler())
+	m := &Manager{
+		sandboxes:       cmap.New[*Sandbox](),
+		serviceHandler:  handlers,
+		monitorStopChan: cmap.New[chan struct{}](),
+		exitNotifiers:   cmap.New[*exitNotifier](),
+		syncEventChan:   make(chan Event, 1),
+		stopChan:        make(chan struct{}),
+	}
+	metadata := &runtime.SandboxMetadata{ID: id, RuntimeHandler: "runsc"}
+	m.sandboxes.Set(id, &Sandbox{
+		Metadata: metadata,
+		Status:   &statusStorage{status: Status{StartedAt: time.Now().Format(time.RFC3339Nano)}},
+	})
+
+	m.ReceiveEvent(Event{Type: EventTypeCreate, MetaData: metadata, SandboxID: id})
+	t.Cleanup(func() { m.stopMonitor(id) })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := m.WaitForExit(ctx, id)
+	assert.ErrorIs(t, err, context.Canceled)
+}
+
+func TestReceiveCreateAfterStopDoesNotPublishMonitor(t *testing.T) {
+	const id = "sbox-create-after-stop"
+	handlers := cmap.New[svc.Handler]()
+	handlers.Set("runsc", svc.NewFakeRuntimeHandler())
+	m := &Manager{
+		sandboxes:       cmap.New[*Sandbox](),
+		serviceHandler:  handlers,
+		monitorStopChan: cmap.New[chan struct{}](),
+		exitNotifiers:   cmap.New[*exitNotifier](),
+		syncEventChan:   make(chan Event, 1),
+		stopChan:        make(chan struct{}),
+	}
+	metadata := &runtime.SandboxMetadata{ID: id, RuntimeHandler: "runsc"}
+
+	m.Stop()
+	m.ReceiveEvent(Event{Type: EventTypeCreate, MetaData: metadata, SandboxID: id})
+
+	assert.False(t, m.monitorStopChan.Has(id))
+	assert.False(t, m.exitNotifiers.Has(id))
+}
+
+func TestReceiveCreateAndStopAreLinearized(t *testing.T) {
+	const iterations = 100
+	for range iterations {
+		const id = "sbox-create-stop-race"
+		handlers := cmap.New[svc.Handler]()
+		handlers.Set("runsc", svc.NewFakeRuntimeHandler())
+		m := &Manager{
+			sandboxes:       cmap.New[*Sandbox](),
+			serviceHandler:  handlers,
+			monitorStopChan: cmap.New[chan struct{}](),
+			exitNotifiers:   cmap.New[*exitNotifier](),
+			syncEventChan:   make(chan Event, 1),
+			stopChan:        make(chan struct{}),
+		}
+		metadata := &runtime.SandboxMetadata{ID: id, RuntimeHandler: "runsc"}
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			m.ReceiveEvent(Event{
+				Type:      EventTypeCreate,
+				MetaData:  metadata,
+				SandboxID: id,
+			})
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			m.Stop()
+		}()
+
+		close(start)
+		wg.Wait()
+
+		assert.False(t, m.monitorStopChan.Has(id))
+		if notifier, ok := m.exitNotifiers.Get(id); ok {
+			select {
+			case <-notifier.done:
+			default:
+				t.Fatal("exit notifier remained open after Stop")
+			}
+		}
+	}
+}
+
 func TestWaitForExit_AlreadyExitedFastPath(t *testing.T) {
 	m, id := newWaitForExitManager(t, "sbox-fastpath")
 	// Mark sandbox as already exited without touching the notifier; the

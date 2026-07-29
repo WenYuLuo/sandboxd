@@ -63,12 +63,17 @@ type Manager struct {
 	// callers. Created when monitor starts; closed once after SetExit has
 	// persisted the terminal status, or on Delete/Stop.
 	exitNotifiers cmap.ConcurrentMap[string, *exitNotifier]
-	// handle sandbox event asynchronously, largest 200 events
+	// Handle sandbox events asynchronously. Create is the exception: its
+	// monitor and exit notifier are published before ReceiveEvent returns.
 	syncEventChan chan Event
 	// check id is valid
 	idGenerator util.UniqueIDGenerator
 
-	stopChan chan struct{}
+	// lifecycleMu linearizes monitor publication with shutdown. Once stopped
+	// is set, no new monitor or exit notifier may be registered.
+	lifecycleMu sync.Mutex
+	stopped     bool
+	stopChan    chan struct{}
 
 	healthChan chan bool
 
@@ -158,16 +163,26 @@ func (m *Manager) Start() {
 }
 
 func (m *Manager) Stop() {
+	m.lifecycleMu.Lock()
+	defer m.lifecycleMu.Unlock()
+	if m.stopped {
+		return
+	}
+	m.stopped = true
 	close(m.stopChan)
 
+	// Stop monitors synchronously while holding lifecycleMu. A concurrent
+	// startMonitorGoroutine either publishes before this sweep or observes
+	// stopped and returns without publishing.
+	for item := range m.monitorStopChan.IterBuffered() {
+		m.stopMonitor(item.Key)
+	}
+
 	// Wake up any pending WaitForExit callers so they don't block past
-	// shutdown. Iterating after closing stopChan is safe because new
-	// notifiers are only created from monitor start paths which are
-	// idempotent.
+	// shutdown. lifecycleMu prevents new notifiers after this sweep.
 	for item := range m.exitNotifiers.IterBuffered() {
 		item.Val.close()
 	}
-
 }
 
 // loop receive sandbox event from runtime handler or runtime lifecycle.
@@ -439,6 +454,13 @@ func (m *Manager) loadSandboxes() error {
 // Maintain the serviceHandler synchronously instead of doing it in goroutine to avoid trace condition
 // e.g. run `go m.startMonitor()` then run `m.Delete(id)` the Delete could run before startMonitor
 func (m *Manager) startMonitorGoroutine(metaData *runtime.SandboxMetadata, stop chan struct{}) {
+	m.lifecycleMu.Lock()
+	defer m.lifecycleMu.Unlock()
+	if m.stopped {
+		logrus.Debugf("ignore monitor start after sandbox manager shutdown: %s", metaData.ID)
+		return
+	}
+
 	handler, ok := m.serviceHandler.Get(metaData.RuntimeHandler)
 	if !ok {
 		logrus.Errorf("runtime handler %s for %s not found, skip it", metaData.RuntimeHandler, metaData.ID)
@@ -832,6 +854,13 @@ func (m *Manager) stopMonitor(id string) {
 }
 
 func (m *Manager) ReceiveEvent(event Event) {
+	if event.Type == EventTypeCreate {
+		// Start returns immediately after publishing this event. Handle Create
+		// synchronously so a concurrent Wait cannot observe the sandbox before
+		// its exit notifier has been registered.
+		m.syncEvent(event)
+		return
+	}
 	select {
 	case m.syncEventChan <- event:
 		logrus.Debugf("receive event: %+v", event)
