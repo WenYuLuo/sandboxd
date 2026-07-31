@@ -1,7 +1,7 @@
 # sandboxd E2E
 
-This flow validates the public runsc adapter and transparent cgroup selection
-without an AKernel node image.
+This flow validates the public runsc adapter with and without sandbox-managed
+cgroups, without an AKernel node image.
 
 It performs:
 
@@ -18,6 +18,8 @@ It performs:
 8. reuses the cached cgroup with different limits and verifies that the OOM
    state and mutable controls do not leak between leases
 9. restarts sandboxd and verifies recovery plus OOM monitoring reattachment
+10. reruns start, list, exec, and delete in the experimental cgroup-disabled
+    mode with `/sys/fs/cgroup` read-only
 
 Use the tested `runsc release-20260706.0`. The adapter reads runsc state and
 uses gVisor control RPCs, so another release is not assumed compatible.
@@ -37,7 +39,9 @@ Requirements:
 - a usable iptables nat table
 
 The test detects the host mode from `/sys/fs/cgroup/cgroup.controllers`.
-There is no sandboxd configuration switch for the cgroup version.
+There is no sandboxd configuration switch for the cgroup version. The
+separate disabled-mode container does not use the host cgroup namespace and
+bind-mounts the hierarchy read-only.
 
 Set `RUN_UNIT_TESTS=0` to skip the unit-test step when rerunning only the
 privileged scenario.

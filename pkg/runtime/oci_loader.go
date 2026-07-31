@@ -92,7 +92,8 @@ func NewBundleLoader(baseFile, bundleDir string) (*BundleLoader, error) {
 
 func (r *BundleLoader) GenerateOci(options OciLoadOptions) (string, *Spec, error) {
 	ociSpec := r.baseSpec.DeepCopy()
-	if options.OverrideBundleDir == "" && (options.SandboxID == "" || options.CgroupPath == "") {
+	if options.OverrideBundleDir == "" &&
+		(options.SandboxID == "" || (!options.Config.DisableCgroup && options.CgroupPath == "")) {
 		logrus.Debugf("invalid options, cg: %v", options.CgroupPath)
 		return "", ociSpec, errord.ErrInvalidArgument
 	}
@@ -137,7 +138,12 @@ func (r *BundleLoader) GenerateOci(options OciLoadOptions) (string, *Spec, error
 		return "", ociSpec, fmt.Errorf("resolve sandbox bundle: %w", err)
 	}
 
-	setSpecResource(ociSpec, options.Config.Resources)
+	if options.Config.DisableCgroup {
+		ociSpec.Linux.CgroupsPath = ""
+		ociSpec.Linux.Resources = nil
+	} else {
+		setSpecResource(ociSpec, options.Config.Resources)
+	}
 	if _, ok := ociSpec.Annotations[IgnoreResourceFieldAnnoKey]; ok {
 		logrus.Debugf("ignore resource field for %v", options.SandboxID)
 		ociSpec.Linux.Resources = nil

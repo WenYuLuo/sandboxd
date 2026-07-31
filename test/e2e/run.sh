@@ -21,6 +21,7 @@ ROOT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 DOCKER="${DOCKER:-docker}"
 IMAGE="${SANDBOXD_E2E_IMAGE:-sandboxd-e2e:local}"
 CONTAINER="${SANDBOXD_E2E_CONTAINER:-sandboxd-e2e}"
+DISABLED_CONTAINER="${SANDBOXD_E2E_DISABLED_CONTAINER:-${CONTAINER}-no-cgroup}"
 RUN_UNIT_TESTS="${RUN_UNIT_TESTS:-1}"
 RUNSC_BINARY="${RUNSC_BINARY:-}"
 E2E_STRESS_ROUNDS="${E2E_STRESS_ROUNDS:-0}"
@@ -36,9 +37,12 @@ fail() {
 }
 
 cleanup_container() {
-    if "${DOCKER}" ps -a --format '{{.Names}}' | grep -qx "${CONTAINER}"; then
-        "${DOCKER}" rm -f "${CONTAINER}" >/dev/null 2>&1 || true
-    fi
+    local name
+    for name in "${CONTAINER}" "${DISABLED_CONTAINER}"; do
+        if "${DOCKER}" ps -a --format '{{.Names}}' | grep -qx "${name}"; then
+            "${DOCKER}" rm -f "${name}" >/dev/null 2>&1 || true
+        fi
+    done
 }
 trap cleanup_container EXIT
 
@@ -92,6 +96,24 @@ set -e
 if [ "${status}" -ne 0 ]; then
     log "container logs"
     "${DOCKER}" logs "${CONTAINER}" >&2 || true
+    exit "${status}"
+fi
+
+log "running cgroup-disabled e2e container ${DISABLED_CONTAINER}"
+set +e
+"${DOCKER}" run \
+    --name "${DISABLED_CONTAINER}" \
+    --privileged \
+    --net bridge \
+    -e E2E_DISABLE_CGROUP=1 \
+    -v /sys/fs/cgroup:/sys/fs/cgroup:ro \
+    "${IMAGE}"
+status=$?
+set -e
+
+if [ "${status}" -ne 0 ]; then
+    log "cgroup-disabled container logs"
+    "${DOCKER}" logs "${DISABLED_CONTAINER}" >&2 || true
     exit "${status}"
 fi
 

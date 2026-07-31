@@ -20,6 +20,10 @@ ip_range = "10.88.0.1/24"
 nat_backend = "iptables"
 
 [plugin.resource]
+# EXPERIMENTAL/DEBUG ONLY. Set true when /sys/fs/cgroup is read-only.
+# Sandboxes then inherit the sandboxd process cgroup, and per-sandbox CPU,
+# memory, and pids limits are not enforced. Only runsc is available.
+disable_cgroup = false
 cgroup_cache_size = 1
 # Maximum processes per sandbox. Omit or set to 0 for unlimited.
 # pids_max = 4096

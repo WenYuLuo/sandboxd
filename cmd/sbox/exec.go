@@ -85,6 +85,11 @@ var ExecCmd = cli.Command{
 			Value:  defaultContainersRoot,
 			EnvVar: "SANDBOXD_CONTAINERS_ROOT",
 		},
+		cli.BoolFlag{
+			Name:   "ignore-cgroups",
+			Usage:  "tell runsc exec not to create or join cgroups",
+			EnvVar: "RUNSC_IGNORE_CGROUPS",
+		},
 	},
 	Action: func(context *cli.Context) error {
 		if context.NArg() < 2 {
@@ -147,8 +152,9 @@ func newExecRunner(runtimeName string, context *cli.Context) (execRunner, error)
 	switch runtimeName {
 	case config.RuntimeNameRunsc:
 		return &runscExecRunner{
-			binary: context.String("runtime-binary"),
-			root:   context.String("runtime-root"),
+			binary:        context.String("runtime-binary"),
+			root:          context.String("runtime-root"),
+			ignoreCgroups: context.Bool("ignore-cgroups"),
 		}, nil
 	case config.RuntimeNameKata:
 		return &kataExecRunner{

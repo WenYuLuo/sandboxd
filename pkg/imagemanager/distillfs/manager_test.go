@@ -206,7 +206,7 @@ func TestNewManager(t *testing.T) {
 		wantErr bool
 	}{
 		{
-			name: "valid config",
+			name: "valid cgroup-disabled config",
 			config: &ManagerConfig{
 				Root:              tmpDir,
 				OSSCfgPath:        ossCfgPath,
@@ -214,6 +214,7 @@ func TestNewManager(t *testing.T) {
 				BinPath:           "/usr/local/bin/distill_fs",
 				OSSAuthsPath:      ossAuthsPath,
 				RegistryAuthsPath: registryAuthsPath,
+				DisableCgroup:     true,
 			},
 			wantErr: false,
 		},
@@ -259,6 +260,9 @@ func TestNewManager(t *testing.T) {
 			if !tt.wantErr {
 				if mgr == nil {
 					t.Fatal("NewManager() returned nil manager")
+				}
+				if tt.config.DisableCgroup && mgr.(*manager).cgroupCtrl != nil {
+					t.Fatal("cgroup-disabled manager created a cgroup controller")
 				}
 
 				// Verify directories were created

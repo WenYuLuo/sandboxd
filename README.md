@@ -33,7 +33,9 @@ make test
 make vet
 ```
 
-The privileged E2E suite requires Docker, iptables, a writable cgroup v1 or v2 hierarchy, and the tested runsc release:
+The privileged E2E suite requires Docker, iptables, and the tested runsc
+release. It validates both a writable cgroup v1/v2 hierarchy and the
+cgroup-disabled mode with `/sys/fs/cgroup` mounted read-only:
 
 ```bash
 RUNSC_BINARY=/usr/local/bin/runsc make e2e
@@ -73,6 +75,14 @@ tools/               pinned protobuf code-generation image
 
 - Kata Containers requires a usable `/dev/kvm` device; nodes without KVM continue to support gVisor.
 - sandboxd detects the local cgroup mode at startup. Legacy and hybrid hosts use cgroup v1; unified hosts use cgroup v2. The gRPC API and resource-cache behavior are identical in both modes.
+- `[plugin.resource].disable_cgroup = true` enables an experimental/debug
+  compatibility mode for environments where sandboxd cannot write the
+  delegated hierarchy. sandboxd, distill-fs, and runsc then perform no cgroup
+  writes; runsc sandboxes inherit the sandboxd process cgroup. Per-sandbox
+  CPU, memory, and pids requests are accepted but not enforced, per-sandbox
+  Stats returns `FailedPrecondition`, and non-runsc runtimes are not
+  advertised. Do not use this mode when per-sandbox resource isolation is
+  required.
 - To minimize sandbox startup latency, sandboxd caches and reuses physical cgroups across sandbox leases. Cumulative CPU accounting and peak-memory statistics therefore cover the physical cgroup lifetime, and reclaimable charges such as page cache may remain until kernel pressure reclaims them; CPU utilization calculated from sampling deltas and configured resource limits remain correct for the active sandbox.
 - The direct OCI registry client currently skips TLS certificate verification and should only be used with trusted registries.
 

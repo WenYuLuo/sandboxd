@@ -36,18 +36,19 @@ type Handler interface {
 }
 
 type StartConfig struct {
-	ID          string
-	Command     []string
-	Mounts      []*runtime.Mount
-	Rootfs      string
-	Resources   *runtime.LinuxSandboxResources
-	Envs        []*runtime.KeyValue
-	Stdout      string
-	Stderr      string
-	Cwd         string
-	CgroupPath  string
-	Annotations map[string]string
-	Network     *networkmanager.NetResource
+	ID            string
+	Command       []string
+	Mounts        []*runtime.Mount
+	Rootfs        string
+	Resources     *runtime.LinuxSandboxResources
+	Envs          []*runtime.KeyValue
+	Stdout        string
+	Stderr        string
+	Cwd           string
+	CgroupPath    string
+	Annotations   map[string]string
+	Network       *networkmanager.NetResource
+	DisableCgroup bool
 }
 
 func NewHandler(cfg config.Config, bin, runtimeName string) (Handler, error) {

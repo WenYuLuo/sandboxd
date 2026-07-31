@@ -32,6 +32,8 @@ HTTP_PORT="${E2E_HTTP_PORT:-18080}"
 BRIDGE_NAME="${E2E_BRIDGE_NAME:-sandbox0}"
 STRESS_ROUNDS="${E2E_STRESS_ROUNDS:-0}"
 STRESS_CONCURRENCY="${E2E_STRESS_CONCURRENCY:-8}"
+DISABLE_CGROUP="${E2E_DISABLE_CGROUP:-0}"
+export RUNSC_IGNORE_CGROUPS="${DISABLE_CGROUP}"
 
 SANDBOXD_PID=""
 HTTPD_PID=""
@@ -51,6 +53,9 @@ fail() {
 }
 
 cleanup_cgroups() {
+    if [ "${DISABLE_CGROUP}" = "1" ]; then
+        return
+    fi
     if [ "${CGROUP_MODE}" = "v2" ]; then
         if [ -d "/sys/fs/cgroup/${CGROUP_ROOT}" ]; then
             find "/sys/fs/cgroup/${CGROUP_ROOT}" -depth -type d -print 2>/dev/null | while read -r dir; do
@@ -102,13 +107,16 @@ preflight() {
     [ "$(id -u)" = "0" ] || fail "e2e container must run as root"
     [[ "${STRESS_ROUNDS}" =~ ^[0-9]+$ ]] || fail "E2E_STRESS_ROUNDS must be a non-negative integer"
     [[ "${STRESS_CONCURRENCY}" =~ ^[1-8]$ ]] || fail "E2E_STRESS_CONCURRENCY must be between 1 and 8"
+    [[ "${DISABLE_CGROUP}" =~ ^[01]$ ]] || fail "E2E_DISABLE_CGROUP must be 0 or 1"
 
     local bin
     for bin in sandboxd sbox runsc ip iptables busybox; do
         command -v "${bin}" >/dev/null 2>&1 || fail "missing command: ${bin}"
     done
 
-    if [ -f /sys/fs/cgroup/cgroup.controllers ]; then
+    if [ "${DISABLE_CGROUP}" = "1" ]; then
+        log "cgroup management disabled; skipping writable-cgroup preflight"
+    elif [ -f /sys/fs/cgroup/cgroup.controllers ]; then
         CGROUP_MODE="v2"
         CGROUP_DIR="/sys/fs/cgroup/${CGROUP_ROOT}"
         local probe="/sys/fs/cgroup/${CGROUP_ROOT}-probe-$$"
@@ -131,7 +139,9 @@ preflight() {
     else
         fail "neither cgroup v1 nor cgroup v2 is available"
     fi
-    log "detected ${CGROUP_MODE}"
+    if [ "${DISABLE_CGROUP}" != "1" ]; then
+        log "detected ${CGROUP_MODE}"
+    fi
 
     iptables -t nat -L >/dev/null || fail "iptables nat table is not usable"
 }
@@ -192,6 +202,11 @@ EOF
 {"auths": {}}
 EOF
 
+    local disable_cgroup=false
+    if [ "${DISABLE_CGROUP}" = "1" ]; then
+        disable_cgroup=true
+    fi
+
     cat > "${CONFIG_FILE}" <<EOF
 rootDir = "${SANDBOXD_ROOT}"
 storeDir = "${SANDBOXD_STORE}"
@@ -201,6 +216,7 @@ ip_range = "${NETWORK_CIDR}"
 nat_backend = "iptables"
 
 [plugin.resource]
+disable_cgroup = ${disable_cgroup}
 cgroup_cache_size = 1
 interface_cache_size = 1
 cgroup_root_name = "/${CGROUP_ROOT}"
@@ -585,6 +601,35 @@ run_checks() {
     run_stress_checks
 }
 
+run_cgroup_disabled_checks() {
+    log "starting sandbox without cgroup management"
+    SANDBOX_ID="$(sbox_cmd start \
+        --quiet \
+        --runtime runsc \
+        --sandbox-id sbox-e2e-no-cgroup \
+        --rootfs "${ROOTFS}" \
+        --cwd / \
+        --env E2E_MARKER=no-cgroup-ok \
+        --mount "${HOST_MOUNT}:/mnt/host" \
+        --cpu-millicores 100 \
+        --memory-mb 128 \
+        /bin/sh -c 'echo "$E2E_MARKER" > /tmp/start-env && sleep 300')"
+    [ -n "${SANDBOX_ID}" ] || fail "start returned empty sandbox id"
+
+    local list_line
+    list_line="$(sbox_cmd list | grep "${SANDBOX_ID}")" || fail "sandbox not found in list"
+    echo "${list_line}" | grep -q "SANDBOX_STATE_RUNNING" || fail "sandbox is not running: ${list_line}"
+
+    local got
+    got="$(sbox_cmd exec "${SANDBOX_ID}" /bin/cat /tmp/start-env)"
+    assert_eq "${got}" "no-cgroup-ok" "start env"
+    got="$(sbox_cmd exec "${SANDBOX_ID}" /bin/cat /mnt/host/input.txt)"
+    assert_eq "${got}" "host-mount-ok" "host bind mount read"
+
+    sbox_cmd delete "${SANDBOX_ID}"
+    SANDBOX_ID=""
+}
+
 main() {
     preflight
     cleanup_cgroups
@@ -592,7 +637,11 @@ main() {
     prepare_rootfs
     start_sandboxd
     start_gateway_httpd
-    run_checks
+    if [ "${DISABLE_CGROUP}" = "1" ]; then
+        run_cgroup_disabled_checks
+    else
+        run_checks
+    fi
     log "e2e passed"
 }
 

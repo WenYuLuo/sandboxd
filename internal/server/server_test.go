@@ -32,6 +32,8 @@ import (
 	"github.com/inclusionAI/sandboxd/pkg/store"
 	cmap "github.com/orcaman/concurrent-map/v2"
 	"github.com/stretchr/testify/assert"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // newTestService creates an sandboxService with a real sandbox.Manager backed by a temp dir.
@@ -164,6 +166,16 @@ func TestDistillFSRecoveryGatesNewSandboxTraffic(t *testing.T) {
 	assert.Error(t, err)
 	_, err = s.Start(context.Background(), &runtime.StartRequest{})
 	assert.Error(t, err)
+}
+
+func TestStatsFailsWhenCgroupManagementIsDisabled(t *testing.T) {
+	s := newTestService(t, map[string]svc.Handler{
+		config.RuntimeNameRunsc: svc.NewFakeRuntimeHandler(),
+	})
+	s.config.DisableCgroup = true
+
+	_, err := s.Stats(context.Background(), &runtime.StatsRequest{ID: "sbox-test"})
+	assert.Equal(t, codes.FailedPrecondition, status.Code(err))
 }
 
 func TestList_ById_NotFound(t *testing.T) {

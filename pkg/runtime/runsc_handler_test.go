@@ -35,3 +35,14 @@ func TestNewRunscHandlerUsesSharedLogFile(t *testing.T) {
 	}
 	assert.Equal(t, filepath.Join(baseDir, "logs", config.RuntimeNameRunsc, "runsc.log"), client.Options.DebugLogPath)
 }
+
+func TestNewRunscHandlerPropagatesIgnoreCgroups(t *testing.T) {
+	rootDir := filepath.Join(t.TempDir(), "sandboxd", "root")
+	cfg := config.Config{RootDir: rootDir}
+	cfg.DisableCgroup = true
+	handler, err := NewRunscHandler(cfg, "/usr/local/bin/runsc", nil)
+	assert.NoError(t, err)
+
+	client := handler.runsc.(*runscapi.Client)
+	assert.True(t, client.Options.IgnoreCgroups)
+}

@@ -103,6 +103,35 @@ func TestGenerateOciPreservesEntrypoint(t *testing.T) {
 	}
 }
 
+func TestGenerateOciWithoutCgroup(t *testing.T) {
+	loader, err := NewBundleLoader("", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	shares := uint64(1024)
+	memory := int64(512 << 20)
+	_, spec, err := loader.GenerateOci(OciLoadOptions{
+		SandboxID: "sandbox-no-cgroup",
+		Config: StartConfig{
+			Rootfs:        t.TempDir(),
+			DisableCgroup: true,
+			Resources: &runtime.LinuxSandboxResources{
+				CpuShares:          shares,
+				MemoryLimitInBytes: memory,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spec.Linux.CgroupsPath != "" {
+		t.Fatalf("cgroupsPath = %q, want empty", spec.Linux.CgroupsPath)
+	}
+	if spec.Linux.Resources != nil {
+		t.Fatalf("Linux resources = %+v, want nil", spec.Linux.Resources)
+	}
+}
+
 func TestGenerateOciRejectsEscapingSandboxID(t *testing.T) {
 	loader, err := NewBundleLoader("", t.TempDir())
 	if err != nil {

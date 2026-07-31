@@ -31,8 +31,9 @@ import (
 )
 
 type runscExecRunner struct {
-	binary string
-	root   string
+	binary        string
+	root          string
+	ignoreCgroups bool
 }
 
 type ttyProcessResult struct {
@@ -51,7 +52,11 @@ func (r *runscExecRunner) command(
 	request execRequest,
 	runtimeArgs ...string,
 ) *exec.Cmd {
-	args := []string{"--root", r.root, "exec"}
+	args := []string{"--root", r.root}
+	if r.ignoreCgroups {
+		args = append(args, "--ignore-cgroups")
+	}
+	args = append(args, "exec")
 	args = append(args, runtimeArgs...)
 	if request.user != "" {
 		args = append(args, "--user", request.user)

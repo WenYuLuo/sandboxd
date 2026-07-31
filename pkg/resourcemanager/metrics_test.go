@@ -219,6 +219,31 @@ func TestCollectSandboxObservations(t *testing.T) {
 	assert.Empty(t, c.collectSandboxObservations(current), "expired tombstones must be discarded")
 }
 
+func TestCollectSandboxObservationsWithoutCgroup(t *testing.T) {
+	source := &fakeSandboxMetricsSource{targets: []sandbox.MetricsTarget{{
+		SandboxID:    "sbox-shared-cgroup",
+		RuntimeClass: "runsc",
+		MetricLabels: map[string]string{"tenantid": "tenant-a"},
+	}}}
+	statsCalled := false
+	c := &Collector{
+		sandboxSource:  source,
+		prevSandboxCPU: make(map[string]sandboxCPUSample),
+		sandboxStopped: make(map[string]sandboxTombstone),
+		sandboxStats: func(string) (sandboxStats, error) {
+			statsCalled = true
+			return sandboxStats{}, nil
+		},
+	}
+
+	observations := c.collectSandboxObservations(time.Unix(100, 0))
+	require.Len(t, observations, 1)
+	assert.Equal(t, int64(1), observations[0].running)
+	assert.False(t, observations[0].hasCPU)
+	assert.False(t, observations[0].hasMemory)
+	assert.False(t, statsCalled)
+}
+
 func TestSandboxStoppedTombstoneCopiesLabelsAndWinsSnapshotRace(t *testing.T) {
 	target := sandbox.MetricsTarget{
 		SandboxID:    "sbox-stopped",

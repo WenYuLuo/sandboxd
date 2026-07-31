@@ -58,3 +58,13 @@ func TestCreateUsesExactDebugLogPath(t *testing.T) {
 	}
 	t.Fatalf("runsc arguments %q do not contain %q", args, want)
 }
+
+func TestGlobalArgsIgnoreCgroups(t *testing.T) {
+	client := NewClientWithOptions("/usr/local/bin/runsc", "/run/runsc", Options{
+		IgnoreCgroups: true,
+	})
+	args := client.globalArgs()
+	if got := strings.Join(args, " "); got != "--root /run/runsc --ignore-cgroups" {
+		t.Fatalf("global args = %q", got)
+	}
+}

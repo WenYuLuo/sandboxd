@@ -403,6 +403,10 @@ func (c *Collector) collectSandboxObservations(now time.Time) []sandboxObservati
 		}
 		active[target.SandboxID] = struct{}{}
 		observation := sandboxObservation{target: target, running: 1}
+		if target.CgroupPath == "" {
+			observations = append(observations, observation)
+			continue
+		}
 		stats, err := c.sandboxStats(target.CgroupPath)
 		if err != nil {
 			logrus.Debugf("metrics: failed to collect sandbox %s cgroup %s: %v", target.SandboxID, target.CgroupPath, err)

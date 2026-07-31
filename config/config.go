@@ -100,6 +100,13 @@ type KataConfig struct {
 type ResourceConfig struct {
 	MaxInstanceNum int `toml:"max_instance_num" json:"maxInstanceNum"`
 
+	// DisableCgroup enables an experimental/debug compatibility mode that
+	// prevents sandboxd and its runtimes from writing cgroups. Sandboxes
+	// inherit sandboxd's current cgroup, and per-sandbox resource limits are
+	// accepted for API compatibility but are not enforced. Only runsc is
+	// available in this mode.
+	DisableCgroup bool `toml:"disable_cgroup" json:"disableCgroup"`
+
 	// CgroupRootName is the path of cgroup. Default is sandbox.
 	CgroupRootName string `toml:"cgroup_root_name" json:"cgroupRootName"`
 	// CgroupCacheSize is the size of cgroup cache. Default is same as max_instance_num.

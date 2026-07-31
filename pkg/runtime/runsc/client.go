@@ -50,6 +50,7 @@ type Options struct {
 	FilestoreDir     string
 	OverlayTmpfsSize string
 	DebugLogPath     string
+	IgnoreCgroups    bool
 }
 
 type StartArgs struct {
@@ -104,11 +105,10 @@ func (c *Client) Create(ctx context.Context, args StartArgs) error {
 	}
 	defer stderr.Close()
 
-	cmdArgs := []string{
-		"--root", c.RootDir,
+	cmdArgs := append(c.globalArgs(),
 		"-network=sandbox",
 		"--net-raw",
-	}
+	)
 	if c.Options.DebugLogPath != "" {
 		cmdArgs = append(cmdArgs, "-debug-log="+c.Options.DebugLogPath)
 	}
@@ -143,6 +143,14 @@ func rootMemoryOverlay(size string) string {
 		return "root:memory"
 	}
 	return "root:memory,size=" + size
+}
+
+func (c *Client) globalArgs() []string {
+	args := []string{"--root", c.RootDir}
+	if c.Options.IgnoreCgroups {
+		args = append(args, "--ignore-cgroups")
+	}
+	return args
 }
 
 func openOutputFile(path string) (*os.File, error) {
@@ -278,7 +286,7 @@ func waitStatusExitCode(status unix.WaitStatus) int {
 // Delete delegates to runsc delete because that path is upstream's host-side
 // cleanup boundary and calls Container.Destroy() internally.
 func (c *Client) Delete(ctx context.Context, id string, force bool) error {
-	args := []string{"--root", c.RootDir, "delete"}
+	args := append(c.globalArgs(), "delete")
 	if force {
 		args = append(args, "--force")
 	}
@@ -303,11 +311,8 @@ func isRunscNotFound(output []byte) bool {
 }
 
 func (c *Client) ListJSON(ctx context.Context) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, c.Binary,
-		"--root", c.RootDir,
-		"list",
-		"--format", "json",
-	)
+	args := append(c.globalArgs(), "list", "--format", "json")
+	cmd := exec.CommandContext(ctx, c.Binary, args...)
 	out, err := cmd.Output()
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {

@@ -44,6 +44,7 @@ type Config struct {
 	OSSAuthsPath      string
 	RegistryAuthsPath string
 	CgroupMemoryLimit string // human-readable: "512MiB" / "2GiB" / raw bytes; "0" / "" = no limit
+	DisableCgroup     bool
 }
 
 // Module owns the in-process distillfs Manager, OCI manager and HttpWorker.
@@ -103,6 +104,7 @@ func NewModule(cfg Config) (*Module, error) {
 		OSSAuthsPath:      cfg.OSSAuthsPath,
 		RegistryAuthsPath: cfg.RegistryAuthsPath,
 		CgroupMemoryLimit: cgroupMemoryLimit,
+		DisableCgroup:     cfg.DisableCgroup,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("imagemanager: distillfs manager: %w", err)

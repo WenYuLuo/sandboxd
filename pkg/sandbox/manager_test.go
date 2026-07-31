@@ -149,8 +149,12 @@ func TestSandboxMetricsTargets(t *testing.T) {
 	m.sandboxes.Set(withoutCgroup.Metadata.ID, withoutCgroup)
 
 	targets := m.SandboxMetricsTargets()
-	if assert.Len(t, targets, 1) {
-		target := targets[0]
+	if assert.Len(t, targets, 2) {
+		byID := make(map[string]MetricsTarget, len(targets))
+		for _, target := range targets {
+			byID[target.SandboxID] = target
+		}
+		target := byID["sbox-running"]
 		assert.Equal(t, "sbox-running", target.SandboxID)
 		assert.Equal(t, "runsc-class", target.RuntimeClass)
 		assert.Equal(t, "/akernel/sbox-running", target.CgroupPath)
@@ -161,6 +165,10 @@ func TestSandboxMetricsTargets(t *testing.T) {
 
 		target.MetricLabels["tenantid"] = "mutated"
 		assert.Equal(t, "tenant-a", running.Metadata.MetricLabels["tenantid"])
+
+		noCgroupTarget := byID["sbox-no-cgroup"]
+		assert.Empty(t, noCgroupTarget.CgroupPath)
+		assert.Zero(t, noCgroupTarget.CPULimit)
 	}
 }
 

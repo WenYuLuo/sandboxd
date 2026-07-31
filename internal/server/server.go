@@ -107,6 +107,14 @@ func (h *sandboxService) loadRuntimeHandlers() {
 	for {
 		allLoaded := true
 		for runtimeName, runtimeBin := range h.config.PluginConfig.RuntimeConfig.RuntimeBinary {
+			if h.config.DisableCgroup && runtimeName != config.RuntimeNameRunsc {
+				logrus.Warnf(
+					"runtime %v is not registered: experimental cgroup-disabled "+
+						"mode currently supports only runsc",
+					runtimeName,
+				)
+				continue
+			}
 			if h.serviceHandler.Has(runtimeName) {
 				continue
 			}
@@ -284,6 +292,12 @@ func (h *sandboxService) List(ctx context.Context, request *runtime.ListSandboxe
 func (h *sandboxService) Stats(ctx context.Context, request *runtime.StatsRequest) (*runtime.StatsResponse, error) {
 	if request.ID == "" {
 		return nil, errord.ToGRPC(errord.ErrInvalidArgument)
+	}
+	if h.config.DisableCgroup {
+		return nil, errord.ToGRPC(fmt.Errorf(
+			"sandbox stats require per-sandbox cgroups: %w",
+			errord.ErrFailedPrecondition,
+		))
 	}
 
 	// Look up the sandbox to verify it exists.
@@ -584,6 +598,7 @@ func NewSandboxService(root, configPath string) (result SandboxService, retErr e
 		OSSAuthsPath:      cfg.OSSAuthsPath,
 		RegistryAuthsPath: cfg.RegistryAuthsPath,
 		CgroupMemoryLimit: cfg.CgroupMemoryLimit,
+		DisableCgroup:     cfg.DisableCgroup,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("imagemanager: %w", err)
@@ -635,7 +650,7 @@ func NewSandboxService(root, configPath string) (result SandboxService, retErr e
 	// 1 cgroup + 1 interface).
 	maxSandboxLimit := networkmanager.MaxSandboxLimit(cfg.MaxInstanceNum)
 	var cgroupMgr *cgroupmanager.CgroupManager
-	if cfg.CgroupCacheSize > 0 {
+	if !cfg.DisableCgroup && cfg.CgroupCacheSize > 0 {
 		cgroupMgr, err = cgroupmanager.NewCgroupManager(s.store, cfg.ResourceConfig, maxSandboxLimit)
 		if err != nil {
 			return nil, err
@@ -650,6 +665,12 @@ func NewSandboxService(root, configPath string) (result SandboxService, retErr e
 				_ = cgroupMgr.ShutDown()
 			}
 		}()
+	} else if cfg.DisableCgroup {
+		logrus.Warn(
+			"EXPERIMENTAL: cgroup management is disabled; only runsc is " +
+				"available, and per-sandbox CPU, memory, and pids limits " +
+				"are not enforced",
+		)
 	}
 
 	var interfaceMgr *networkmanager.InterfaceManager
@@ -918,19 +939,24 @@ func (h *sandboxService) Start(ctx context.Context, request *runtime.StartReques
 		annotations[key] = value
 	}
 
+	sandboxResources := resourcesToLinux(startReq.Resources)
+	if h.config.DisableCgroup {
+		sandboxResources = nil
+	}
 	runtimeConfig := svc.StartConfig{
-		ID:          sandboxID,
-		Command:     startReq.Command,
-		Rootfs:      preparedFilesystem.RootfsPath(),
-		Resources:   resourcesToLinux(startReq.Resources),
-		Mounts:      preparedFilesystem.Mounts(),
-		Envs:        env,
-		Stdout:      startReq.Stdout,
-		Stderr:      startReq.Stderr,
-		Cwd:         startReq.Cwd,
-		CgroupPath:  preparedResources.Resources[config.ResourceNameCgroup],
-		Annotations: annotations,
-		Network:     preparedResources.network,
+		ID:            sandboxID,
+		Command:       startReq.Command,
+		Rootfs:        preparedFilesystem.RootfsPath(),
+		Resources:     sandboxResources,
+		Mounts:        preparedFilesystem.Mounts(),
+		Envs:          env,
+		Stdout:        startReq.Stdout,
+		Stderr:        startReq.Stderr,
+		Cwd:           startReq.Cwd,
+		CgroupPath:    preparedResources.Resources[config.ResourceNameCgroup],
+		Annotations:   annotations,
+		Network:       preparedResources.network,
+		DisableCgroup: h.config.DisableCgroup,
 	}
 	if err := h.startSandboxRuntime(ctx, startReq.Runtime, runtimeConfig); err != nil {
 		return &runtime.StartResponse{

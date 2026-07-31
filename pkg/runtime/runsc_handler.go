@@ -68,6 +68,7 @@ func NewRunscHandler(cfg config.Config, bin string, loader OciLoader) (*RunscHan
 			FilestoreDir:     cfg.RuntimeConfig.FilestoreDir,
 			OverlayTmpfsSize: cfg.RuntimeConfig.OverlayTmpfsSize,
 			DebugLogPath:     runscLogPath,
+			IgnoreCgroups:    cfg.DisableCgroup,
 		}),
 		ociLoader:              loader,
 		rootfsOverlayTmpfsSize: cfg.RuntimeConfig.OverlayTmpfsSize,

@@ -124,6 +124,7 @@ type ManagerConfig struct {
 	OSSAuthsPath      string          // Path to OSS auths file (oss_auths.json)
 	RegistryAuthsPath string          // Path to registry auths file (registry_auths.json)
 	CgroupMemoryLimit int64           // Memory limit in bytes for distill_fs cgroup (0 = no limit)
+	DisableCgroup     bool            // Never create or modify a distill_fs cgroup
 }
 
 func NewManager(config *ManagerConfig) (Manager, error) {
@@ -137,6 +138,10 @@ func NewManager(config *ManagerConfig) (Manager, error) {
 		ctx = context.Background()
 	}
 
+	var cgroupCtrl *imgcgroup.Controller
+	if !config.DisableCgroup {
+		cgroupCtrl = imgcgroup.NewController(config.CgroupMemoryLimit)
+	}
 	mgr := &manager{
 		ctx:              ctx,
 		binPath:          config.BinPath,
@@ -146,7 +151,7 @@ func NewManager(config *ManagerConfig) (Manager, error) {
 		daemons:          map[string]*Daemon{},
 		recovered:        map[string]bool{},
 		nydusClient:      config.NydusClient,
-		cgroupCtrl:       imgcgroup.NewController(config.CgroupMemoryLimit),
+		cgroupCtrl:       cgroupCtrl,
 	}
 	if err := mgr.prepare(config.OSSCfgPath, config.NydusCfgPath, config.OSSAuthsPath, config.RegistryAuthsPath); err != nil {
 		return nil, fmt.Errorf("failed to prepare distillfs manager: %w", err)

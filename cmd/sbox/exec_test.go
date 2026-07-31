@@ -34,8 +34,9 @@ func TestCommandExitCode(t *testing.T) {
 
 func TestRunscExecCommand(t *testing.T) {
 	runner := &runscExecRunner{
-		binary: "/usr/local/bin/runsc",
-		root:   "/run/runsc",
+		binary:        "/usr/local/bin/runsc",
+		root:          "/run/runsc",
+		ignoreCgroups: true,
 	}
 	command := runner.command(
 		execRequest{
@@ -54,6 +55,7 @@ func TestRunscExecCommand(t *testing.T) {
 		"/usr/local/bin/runsc",
 		"--root",
 		"/run/runsc",
+		"--ignore-cgroups",
 		"exec",
 		"--console-socket",
 		"/tmp/console.sock",

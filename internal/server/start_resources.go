@@ -31,9 +31,9 @@ type preparedStartResources struct {
 }
 
 func (h *sandboxService) prepareStartResources(runtimeName, sandboxID string) (*preparedStartResources, error) {
-	required := config.RuntimeResources[runtimeName]
-	if required == nil {
-		return nil, fmt.Errorf("runtime %s is not supported when preparing resources", runtimeName)
+	required, err := requiredStartResources(runtimeName, h.config.DisableCgroup)
+	if err != nil {
+		return nil, err
 	}
 
 	resultCh := make(chan resourceResult, len(required))
@@ -74,6 +74,21 @@ func (h *sandboxService) prepareStartResources(runtimeName, sandboxID string) (*
 		return nil, firstErr
 	}
 	return resources, nil
+}
+
+func requiredStartResources(runtimeName string, disableCgroup bool) ([]string, error) {
+	configured := config.RuntimeResources[runtimeName]
+	if configured == nil {
+		return nil, fmt.Errorf("runtime %s is not supported when preparing resources", runtimeName)
+	}
+	required := make([]string, 0, len(configured))
+	for _, name := range configured {
+		if disableCgroup && name == config.ResourceNameCgroup {
+			continue
+		}
+		required = append(required, name)
+	}
+	return required, nil
 }
 
 type resourceResult struct {

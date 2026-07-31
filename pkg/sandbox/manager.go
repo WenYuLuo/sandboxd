@@ -597,9 +597,9 @@ type MetricsTarget struct {
 	MetricLabels map[string]string
 }
 
-// SandboxMetricsTargets returns snapshots for running sandboxes that have a
-// cgroup resource. Maps are copied so collection cannot race with lifecycle
-// or metadata updates.
+// SandboxMetricsTargets returns snapshots for running sandboxes. CgroupPath
+// is empty when cgroup management is disabled; lifecycle gauges remain
+// available while per-sandbox resource usage is omitted.
 func (m *Manager) SandboxMetricsTargets() []MetricsTarget {
 	targets := make([]MetricsTarget, 0, m.sandboxes.Count())
 	for _, sb := range m.sandboxes.Items() {
@@ -610,7 +610,7 @@ func (m *Manager) SandboxMetricsTargets() []MetricsTarget {
 			continue
 		}
 		target, ok := sandboxMetricsTarget(sb)
-		if !ok || target.CgroupPath == "" {
+		if !ok {
 			continue
 		}
 		targets = append(targets, target)
