@@ -18,11 +18,16 @@ import (
 	"errors"
 	"net"
 	"testing"
+	"time"
 
 	gomonkey "github.com/agiledragon/gomonkey/v2"
+	"github.com/inclusionAI/sandboxd/config"
 	"github.com/inclusionAI/sandboxd/internal/util"
+	"github.com/inclusionAI/sandboxd/pkg/errord"
+	"github.com/inclusionAI/sandboxd/pkg/store"
 	cmap "github.com/orcaman/concurrent-map/v2"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/vishvananda/netlink"
 )
 
@@ -211,6 +216,91 @@ func TestInterfaceShutdownCleansSNATAndOwnedBridge(t *testing.T) {
 	// Shutdown is idempotent: a second call must not touch host networking.
 	assert.NoError(t, m.ShutDown())
 	assert.Len(t, nat.cleanedRanges, 1)
+}
+
+func TestInterfaceShutdownWaitsForAllocationHandoff(t *testing.T) {
+	const backend = "shutdown-allocation-test"
+	nat := &cleanupNetworkManager{}
+	NetworkManagers[backend] = nat
+	t.Cleanup(func() {
+		delete(NetworkManagers, backend)
+	})
+
+	const resource = `{"interface":{"Name":"pv.ac1100ae"},"ip":"172.17.0.174","type":"bridge"}`
+	db := store.NewMockStore()
+	m := &InterfaceManager{
+		db:              db,
+		size:            1,
+		interfaces:      util.New(""),
+		usingInterfaces: cmap.New[struct{}](),
+		idleIp:          util.New(""),
+		createReqs:      make(chan *createRequest, 1),
+		natBackend:      backend,
+		stopCh:          make(chan struct{}),
+		runDoneCh:       make(chan struct{}),
+	}
+
+	handoffStarted := make(chan struct{})
+	finishHandoff := make(chan struct{})
+	go func() {
+		req := <-m.createReqs
+		req.result <- createResult{id: resource}
+		close(m.runDoneCh)
+	}()
+
+	handoffPatch := gomonkey.ApplyPrivateMethod(
+		m,
+		"markUsing",
+		func(manager *InterfaceManager, value string) (string, error) {
+			close(handoffStarted)
+			<-finishHandoff
+			manager.usingInterfaces.Set(value, struct{}{})
+			return value, nil
+		},
+	)
+	defer handoffPatch.Reset()
+
+	var destroyed []string
+	destroyPatch := gomonkey.ApplyPrivateMethod(
+		m,
+		"destroyDevice",
+		func(_ *InterfaceManager, device net.Interface) error {
+			destroyed = append(destroyed, device.Name)
+			return nil
+		},
+	)
+	defer destroyPatch.Reset()
+
+	allocationDone := make(chan error, 1)
+	go func() {
+		_, err := m.Allocate()
+		allocationDone <- err
+	}()
+	<-handoffStarted
+
+	shutdownDone := make(chan error, 1)
+	go func() {
+		shutdownDone <- m.ShutDown()
+	}()
+
+	select {
+	case err := <-shutdownDone:
+		t.Fatalf("shutdown returned before allocation handoff completed: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(finishHandoff)
+	require.NoError(t, <-allocationDone)
+	require.NoError(t, <-shutdownDone)
+	assert.Equal(t, []string{"pv.ac1100ae"}, destroyed)
+
+	stored, err := db.LoadRaw(config.BridgeIpBucket)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"items":[]}`, string(stored))
+
+	_, err = m.Allocate()
+	assert.ErrorIs(t, err, errord.ErrUnavailable)
+	assert.ErrorIs(t, m.Recycle(resource), errord.ErrUnavailable)
 }
 
 func TestInterfaceShutdownRefusesReplacementBridge(t *testing.T) {

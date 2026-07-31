@@ -64,6 +64,10 @@ type InterfaceManager struct {
 	// createReqs delivers on-demand create requests to the single maintenance
 	// goroutine. Buffered to size so a reserved Allocate never blocks on submit.
 	createReqs chan *createRequest
+	// lifecycleMu prevents Allocate and Recycle handoffs from crossing shutdown
+	// cleanup. closed is guarded by lifecycleMu.
+	lifecycleMu sync.RWMutex
+	closed      bool
 
 	// store resource string.
 	db store.DbStore
@@ -127,6 +131,12 @@ func (m *InterfaceManager) CacheSizeLimit() int { return m.cacheSize }
 
 func (m *InterfaceManager) ShutDown() error {
 	m.shutdownOnce.Do(func() {
+		// Wait for allocations and recycles that already entered the manager to
+		// finish before stopping the worker and taking the cleanup snapshot.
+		m.lifecycleMu.Lock()
+		defer m.lifecycleMu.Unlock()
+		m.closed = true
+
 		if m.stopCh != nil {
 			close(m.stopCh)
 		}
@@ -136,10 +146,13 @@ func (m *InterfaceManager) ShutDown() error {
 		if m.storeDoneCh != nil {
 			<-m.storeDoneCh
 		}
-		if m.storeMark.Load() {
+		cleanupErr := m.cleanup()
+		m.usingInterfaces.Clear()
+		m.storeMark.Store(false)
+		if m.db != nil {
 			m.store()
 		}
-		m.shutdownError = errors.Join(m.cleanup(), m.cleanupNetworkInfrastructure())
+		m.shutdownError = errors.Join(cleanupErr, m.cleanupNetworkInfrastructure())
 	})
 	return m.shutdownError
 }
@@ -303,6 +316,12 @@ func (m *InterfaceManager) cacheNum() int {
 // for the maintenance goroutine to create one on demand (when below max), or
 // fails fast with ErrResourceExhausted (at max, no blocking, no timeout).
 func (m *InterfaceManager) Allocate() (string, error) {
+	m.lifecycleMu.RLock()
+	defer m.lifecycleMu.RUnlock()
+	if m.closed {
+		return "", errord.ErrUnavailable
+	}
+
 	if netResourceStr := m.interfaces.Pop(); netResourceStr != "" {
 		return m.markUsing(netResourceStr)
 	}
@@ -340,6 +359,12 @@ func (m *InterfaceManager) markUsing(netResourceStr string) (string, error) {
 }
 
 func (m *InterfaceManager) Recycle(id string) error {
+	m.lifecycleMu.RLock()
+	defer m.lifecycleMu.RUnlock()
+	if m.closed {
+		return errord.ErrUnavailable
+	}
+
 	m.usingInterfaces.Remove(id)
 	netResource := &NetResource{}
 	if err := netResource.FromString(id); err == nil {
