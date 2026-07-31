@@ -15,10 +15,16 @@
 package runtime
 
 import (
+	"context"
+	"errors"
+	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 
+	runtimeapi "github.com/inclusionAI/sandboxd/api/runtime/v1"
 	"github.com/inclusionAI/sandboxd/config"
+	"github.com/inclusionAI/sandboxd/pkg/networkmanager"
 	runscapi "github.com/inclusionAI/sandboxd/pkg/runtime/runsc"
 	"github.com/stretchr/testify/assert"
 )
@@ -55,3 +61,96 @@ func TestNewRunscHandlerRejectsMissingFilestore(t *testing.T) {
 	_, err := NewRunscHandler(config.Config{RootDir: rootDir}, "/usr/local/bin/runsc", nil)
 	assert.ErrorContains(t, err, "plugin.runtime.filestore_dir")
 }
+
+func TestRunscHandlerDoesNotPrepareNVProxyRootfsForGenericSpecUpdates(t *testing.T) {
+	bundleRoot := t.TempDir()
+	bundlePath := filepath.Join(bundleRoot, "sbox-generic-updates")
+	assert.NoError(t, os.MkdirAll(bundlePath, 0755))
+
+	originalMount := mountRunscNVProxyOverlay
+	t.Cleanup(func() { mountRunscNVProxyOverlay = originalMount })
+	mountRunscNVProxyOverlay = func(_, _, _, _ string) error {
+		return errors.New("unexpected nvproxy overlay")
+	}
+
+	handler := &RunscHandler{
+		runsc:       successfulRunscClient{},
+		ociLoader:   staticOciLoader{bundlePath: bundlePath, spec: &Spec{Root: &Root{Path: t.TempDir()}}},
+		sandboxRoot: bundleRoot,
+	}
+	err := handler.Start(context.Background(), StartConfig{
+		ID:          "sbox-generic-updates",
+		Network:     &networkmanager.NetResource{},
+		SpecUpdates: &SpecUpdates{Annotations: map[string]string{"example": "value"}},
+	})
+	assert.NoError(t, err)
+}
+
+func TestRunscHandlerMountsRootfsImageForNVProxy(t *testing.T) {
+	bundleRoot := t.TempDir()
+	rootfsImage := filepath.Join(t.TempDir(), "rootfs.img")
+	assert.NoError(t, os.WriteFile(rootfsImage, []byte("erofs-placeholder"), 0644))
+
+	loader, err := NewBundleLoader("", bundleRoot)
+	assert.NoError(t, err)
+
+	originalMount := mountRunscNVProxyOverlay
+	originalImageMount := mountRunscNVProxyEROFSImage
+	originalUnmount := unmountRunscNVProxyPath
+	t.Cleanup(func() {
+		mountRunscNVProxyOverlay = originalMount
+		mountRunscNVProxyEROFSImage = originalImageMount
+		unmountRunscNVProxyPath = originalUnmount
+	})
+	var lowerDir string
+	mountRunscNVProxyOverlay = func(lower, _, _, _ string) error {
+		lowerDir = lower
+		return nil
+	}
+	var mountedImage, mountedImageTarget string
+	mountRunscNVProxyEROFSImage = func(source, target string) error {
+		mountedImage, mountedImageTarget = source, target
+		return nil
+	}
+	unmountRunscNVProxyPath = func(string, int) error { return syscall.EINVAL }
+
+	handler := &RunscHandler{
+		runsc:                  successfulRunscClient{},
+		ociLoader:              loader,
+		rootfsOverlayTmpfsSize: "10G",
+		filestoreDir:           t.TempDir(),
+		sandboxRoot:            bundleRoot,
+	}
+	err = handler.Start(context.Background(), StartConfig{
+		ID:         "sbox-rootfs-image",
+		Rootfs:     rootfsImage,
+		CgroupPath: "/akernel/sbox-rootfs-image",
+		Network:    &networkmanager.NetResource{},
+		Resources:  &runtimeapi.LinuxSandboxResources{},
+		SpecUpdates: &SpecUpdates{
+			RequiresHostWritableRootfs: true,
+		},
+	})
+	assert.NoError(t, err)
+	expectedLower := filepath.Join(bundleRoot, "sbox-rootfs-image", runscNVProxyLowerDir)
+	assert.Equal(t, rootfsImage, mountedImage)
+	assert.Equal(t, expectedLower, mountedImageTarget)
+	assert.Equal(t, expectedLower, lowerDir)
+}
+
+type staticOciLoader struct {
+	bundlePath string
+	spec       *Spec
+}
+
+func (l staticOciLoader) GenerateOci(OciLoadOptions) (string, *Spec, error) {
+	return l.bundlePath, l.spec, nil
+}
+
+type successfulRunscClient struct{}
+
+func (successfulRunscClient) Create(context.Context, runscapi.StartArgs) error { return nil }
+func (successfulRunscClient) Start(context.Context, runscapi.StartArgs) error  { return nil }
+func (successfulRunscClient) Wait(context.Context, string) (int, error)        { return 0, nil }
+func (successfulRunscClient) Delete(context.Context, string, bool) error       { return nil }
+func (successfulRunscClient) ListJSON(context.Context) ([]byte, error)         { return []byte("[]"), nil }

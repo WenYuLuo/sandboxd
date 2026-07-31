@@ -25,7 +25,6 @@ import (
 	"syscall"
 
 	runtime "github.com/inclusionAI/sandboxd/api/runtime/v1"
-	"github.com/inclusionAI/sandboxd/pkg/loopdevice"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -51,35 +50,7 @@ type kataRootfsPlan struct {
 	cleanup func() error
 }
 
-var mountKataEROFSImage = func(source, target string) error {
-	manager, err := loopdevice.New("/dev")
-	if err != nil {
-		return err
-	}
-	device, err := manager.AttachReadOnly(source)
-	if err != nil {
-		return err
-	}
-	if err := syscall.Mount(
-		device.Path(),
-		target,
-		kataEROFSMountType,
-		syscall.MS_RDONLY,
-		"",
-	); err != nil {
-		return errors.Join(
-			fmt.Errorf("mount EROFS loop %s at %s: %w", device.Path(), target, err),
-			device.Detach(),
-		)
-	}
-	if err := device.Release(); err != nil {
-		return errors.Join(
-			fmt.Errorf("release mounted EROFS loop %s: %w", device.Path(), err),
-			unmountKataMount(target),
-		)
-	}
-	return nil
-}
+var mountKataEROFSImage = mountReadOnlyEROFSImage
 
 var unmountKataPath = func(target string) error {
 	return syscall.Unmount(target, 0)

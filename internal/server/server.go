@@ -45,6 +45,7 @@ import (
 	"github.com/inclusionAI/sandboxd/pkg/sandbox"
 	"github.com/inclusionAI/sandboxd/pkg/store"
 	"github.com/inclusionAI/sandboxd/pkg/volumemanager"
+	"github.com/inclusionAI/sandboxd/pkg/xpumanager"
 	cmap "github.com/orcaman/concurrent-map/v2"
 	"github.com/pelletier/go-toml"
 	"github.com/sirupsen/logrus"
@@ -79,6 +80,7 @@ type sandboxService struct {
 	resourceMod  *resourcemanager.Module
 	imageMod     *imagemanager.Module
 	volumeMgr    *volumemanager.Module
+	xpuMgr       *xpumanager.Manager
 
 	store store.DbStore
 
@@ -245,6 +247,9 @@ func (h *sandboxService) deleteSandboxRuntime(ctx context.Context, sandboxID str
 		return errord.ToGRPC(err)
 	}
 	metrics.RecordRuntimeCallResult("delete", "success", c.Metadata.RuntimeHandler)
+	if h.xpuMgr != nil {
+		h.xpuMgr.Release(sandboxID)
+	}
 
 	if err := h.fsMgr.Release(sandboxID); err != nil {
 		return err
@@ -566,6 +571,14 @@ func NewSandboxService(root, configPath string) (result SandboxService, retErr e
 	if err := resetMetadataIfResourceStateIncompatible(storePath); err != nil {
 		return nil, fmt.Errorf("reset incompatible metadata: %w", err)
 	}
+	sandboxRoot := filepath.Join(cfg.RootDir, "containers")
+	if err := os.MkdirAll(sandboxRoot, 0755); err != nil {
+		return nil, fmt.Errorf("create sandbox root: %w", err)
+	}
+	xpuMgr := xpumanager.New(
+		cfg.RuntimeConfig.RuntimeBinary[config.RuntimeNameRunsc],
+		sandboxRoot,
+	)
 
 	// The optional node-resource module comes up first so its external resource
 	// socket is visible before image, volume, and sandbox initialization. Gated on
@@ -580,6 +593,7 @@ func NewSandboxService(root, configPath string) (result SandboxService, retErr e
 		if merr != nil {
 			return nil, fmt.Errorf("node-resource module init: %w", merr)
 		}
+		mod.SetXPUProvider(xpuMgr)
 		if serr := mod.Start(); serr != nil {
 			// NewModule already started the OTel collector's periodic-reader
 			// goroutine; if Start then fails to bind /var/run/resource.sock we
@@ -637,6 +651,7 @@ func NewSandboxService(root, configPath string) (result SandboxService, retErr e
 		fsMgr:                             newFSManager(imgSvc, stateStore),
 		imageMod:                          imgMod,
 		resourceMod:                       nodeResMod,
+		xpuMgr:                            xpuMgr,
 	}
 
 	// VolumeManager comes up before runtime handlers. Failure to mount XFS is
@@ -851,6 +866,20 @@ func (h *sandboxService) Start(ctx context.Context, request *runtime.StartReques
 	if startReq.Network == "" {
 		startReq.Network = "sandbox"
 	}
+	for key := range startReq.Envs {
+		if xpumanager.ReservedEnv(key) {
+			err := fmt.Errorf("environment variable %q is managed by sandboxd", key)
+			return &runtime.StartResponse{Code: -1, Message: err.Error()},
+				errord.ToGRPC(errord.ErrInvalidArgument)
+		}
+	}
+	for key := range startReq.Labels {
+		if xpumanager.ReservedAnnotation(key) {
+			err := fmt.Errorf("label %q is managed by sandboxd", key)
+			return &runtime.StartResponse{Code: -1, Message: err.Error()},
+				errord.ToGRPC(errord.ErrInvalidArgument)
+		}
+	}
 	if startReq.ExtraConfig != "" {
 		var extraConfig ExtraConfig
 		if err := json.Unmarshal([]byte(startReq.ExtraConfig), &extraConfig); err != nil {
@@ -888,6 +917,7 @@ func (h *sandboxService) Start(ctx context.Context, request *runtime.StartReques
 	var filesystemCommitted bool
 	var runtimeStarted bool
 	var dnatConfigured bool
+	var xpuAcquired bool
 	defer func() {
 		if startSucceeded {
 			return
@@ -918,6 +948,9 @@ func (h *sandboxService) Start(ctx context.Context, request *runtime.StartReques
 				logrus.Warnf("rollback resources for sandbox %s: %v", sandboxID, err)
 			}
 		}
+		if xpuAcquired && h.xpuMgr != nil {
+			h.xpuMgr.Release(sandboxID)
+		}
 		h.sandboxManager.ReleaseID(sandboxID)
 	}()
 
@@ -944,6 +977,27 @@ func (h *sandboxService) Start(ctx context.Context, request *runtime.StartReques
 			ID:      "",
 		}, err
 	}
+	var specUpdates *svc.SpecUpdates
+	if len(startReq.XpuAllocations) > 0 {
+		if startReq.Runtime != config.RuntimeNameRunsc {
+			err := fmt.Errorf("XPU allocations require runtime %q", config.RuntimeNameRunsc)
+			return &runtime.StartResponse{Code: -1, Message: err.Error()},
+				errord.ToGRPC(errord.ErrInvalidArgument)
+		}
+		if h.xpuMgr == nil {
+			err := errors.New("XPU manager is not configured")
+			return &runtime.StartResponse{Code: -1, Message: err.Error()},
+				errord.ToGRPC(errord.ErrFailedPrecondition)
+		}
+		specUpdates, err = h.xpuMgr.Acquire(sandboxID, startReq.XpuAllocations)
+		if err != nil {
+			return &runtime.StartResponse{
+				Code:    -1,
+				Message: fmt.Sprintf("failed to allocate XPU devices: %v", err),
+			}, errord.ToGRPC(errord.ErrInvalidArgument)
+		}
+		xpuAcquired = specUpdates != nil
+	}
 
 	// Rootfs env (from image mount) goes first with lowest priority; request
 	// envs follow and override on key conflict because combineEnvs uses a map
@@ -952,6 +1006,9 @@ func (h *sandboxService) Start(ctx context.Context, request *runtime.StartReques
 	env := make([]*runtime.KeyValue, 0, len(rootfsEnvs)+len(startReq.Envs))
 	for _, e := range rootfsEnvs {
 		if parts := strings.SplitN(e, "=", 2); len(parts) == 2 {
+			if xpumanager.ReservedEnv(parts[0]) {
+				continue
+			}
 			env = append(env, &runtime.KeyValue{
 				Key:   parts[0],
 				Value: parts[1],
@@ -991,6 +1048,7 @@ func (h *sandboxService) Start(ctx context.Context, request *runtime.StartReques
 		Annotations:   annotations,
 		Network:       preparedResources.network,
 		DisableCgroup: h.config.DisableCgroup,
+		SpecUpdates:   specUpdates,
 	}
 	if err := h.startSandboxRuntime(ctx, startReq.Runtime, runtimeConfig); err != nil {
 		return &runtime.StartResponse{
