@@ -45,3 +45,14 @@ bind-mounts the hierarchy read-only.
 
 Set `RUN_UNIT_TESTS=0` to skip the unit-test step when rerunning only the
 privileged scenario.
+
+## Shutdown cleanup
+
+Configure an unused `[plugin.network].ip_range` whenever sandboxd shares its
+network namespace with other software. The E2E entrypoint selects a usable
+nftables or legacy iptables frontend according to the kernel.
+
+On SIGINT or SIGTERM, sandboxd deletes the sandboxes and network resources it
+owns, including veth pairs, SNAT and DNAT rules, and the `sandbox0` bridge.
+Kubernetes must allow enough termination grace time for that cleanup; SIGKILL
+cannot run shutdown hooks.

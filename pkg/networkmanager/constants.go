@@ -24,8 +24,6 @@ import (
 // Moved here so the network pool owns all its plumbing; sandbox.Manager no
 // longer holds shared resource-type knowledge.
 const (
-	defaultIpRange = "10.88.0.1/16"
-
 	BridgeName        = "sandbox0"
 	containerEthName  = "eth0"
 	ContainerLoopName = "lo"

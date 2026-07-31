@@ -377,6 +377,9 @@ func (h *sandboxService) Shutdown() {
 			continue
 		}
 		id := c.Metadata.ID
+		if h.networkMgr != nil {
+			h.networkMgr.cleanupDnatRules(id)
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		if err := h.deleteSandboxRuntime(ctx, id); err != nil {
 			logrus.Warnf("shutdown: failed to delete sandbox %s: %v", id, err)

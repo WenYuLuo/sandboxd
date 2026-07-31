@@ -50,6 +50,7 @@ type InterfaceManager struct {
 
 	bridgeLink netlink.Link
 	linkOps    linkOperations
+	natBackend string
 
 	mask net.IPMask
 
@@ -70,6 +71,12 @@ type InterfaceManager struct {
 	// storeMark is used to mark whether the cgroup id need to be stored.
 	// If it's true, manager should not exit.
 	storeMark atomic.Bool
+
+	stopCh        chan struct{}
+	runDoneCh     chan struct{}
+	storeDoneCh   chan struct{}
+	shutdownOnce  sync.Once
+	shutdownError error
 }
 
 type linkOperations interface {
@@ -119,11 +126,22 @@ type storedInterfaceIDs struct {
 func (m *InterfaceManager) CacheSizeLimit() int { return m.cacheSize }
 
 func (m *InterfaceManager) ShutDown() error {
-	if m.storeMark.Load() {
-		m.store()
-	}
-	m.cleanup()
-	return nil
+	m.shutdownOnce.Do(func() {
+		if m.stopCh != nil {
+			close(m.stopCh)
+		}
+		if m.runDoneCh != nil {
+			<-m.runDoneCh
+		}
+		if m.storeDoneCh != nil {
+			<-m.storeDoneCh
+		}
+		if m.storeMark.Load() {
+			m.store()
+		}
+		m.shutdownError = errors.Join(m.cleanup(), m.cleanupNetworkInfrastructure())
+	})
+	return m.shutdownError
 }
 
 // run is the single maintenance goroutine: it performs all create/destroy
@@ -131,11 +149,16 @@ func (m *InterfaceManager) ShutDown() error {
 // on-demand create requests and periodically shrinks excess idle back to
 // cacheSize.
 func (m *InterfaceManager) run() {
+	if m.runDoneCh != nil {
+		defer close(m.runDoneCh)
+	}
 	m.fillToCacheSize()
 	ticker := time.NewTicker(shrinkInterval)
 	defer ticker.Stop()
 	for {
 		select {
+		case <-m.stopCh:
+			return
 		case req := <-m.createReqs:
 			id, err := m.doCreate()
 			if err != nil {
@@ -158,6 +181,12 @@ func (m *InterfaceManager) run() {
 // fillToCacheSize creates idle interfaces until idle reaches cacheSize (or max).
 func (m *InterfaceManager) fillToCacheSize() {
 	for {
+		select {
+		case <-m.stopCh:
+			return
+		default:
+		}
+
 		m.mu.Lock()
 		if m.interfaces.Length() >= m.cacheSize || m.total >= m.size {
 			m.mu.Unlock()
@@ -340,9 +369,16 @@ func (m *InterfaceManager) Status() ([]string, []string) {
 
 func (m *InterfaceManager) keepStoring() {
 	go func() {
+		if m.storeDoneCh != nil {
+			defer close(m.storeDoneCh)
+		}
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
 		for {
 			select {
-			case <-time.After(5 * time.Second):
+			case <-m.stopCh:
+				return
+			case <-ticker.C:
 				if m.storeMark.Load() {
 					m.storeMark.Store(false)
 					m.store()
@@ -372,28 +408,37 @@ func (m *InterfaceManager) store() {
 	}
 }
 
-// Call it when received SIGTERM sent by pod destroying
-// We can't count on auto deleting when netns deleting because we should slow down the deleting
-func (m *InterfaceManager) cleanup() {
+// cleanup removes both idle and still-leased veth pairs. The server normally
+// releases all sandbox leases before this method runs, but including the using
+// set keeps a failed sandbox deletion from leaking sandbox network interfaces.
+func (m *InterfaceManager) cleanup() error {
 	logrus.Debugf("start to cleanup interfaces")
 
-	interfaces := m.interfaces.List()
+	interfaces := append(m.interfaces.List(), m.usingInterfaces.Keys()...)
+	seen := make(map[string]struct{}, len(interfaces))
+	var errs []error
 	for _, devStr := range interfaces {
 		if devStr == "" {
-			logrus.Errorf("no idle interface")
 			continue
 		}
 		dev, err := NewNetResource(devStr)
 		if err != nil {
 			logrus.Errorf("parse net resource failed: %v", err)
+			errs = append(errs, fmt.Errorf("parse network resource: %w", err))
 			continue
 		}
 		if dev.Interface == nil {
 			logrus.Errorf("interface metadata missing when cleanup: %s", dev.ToString())
+			errs = append(errs, fmt.Errorf("interface metadata missing for network resource %s", dev.ToString()))
 			continue
 		}
+		if _, duplicate := seen[dev.Interface.Name]; duplicate {
+			continue
+		}
+		seen[dev.Interface.Name] = struct{}{}
 		if err := m.destroyDevice(*dev.Interface); err != nil {
-			logrus.Errorf("destory interface %s failed: %v", dev.ToString(), err)
+			logrus.Errorf("destroy interface %s failed: %v", dev.ToString(), err)
+			errs = append(errs, fmt.Errorf("destroy interface %s: %w", dev.Interface.Name, err))
 			continue
 		}
 
@@ -402,6 +447,49 @@ func (m *InterfaceManager) cleanup() {
 	}
 
 	logrus.Debugf("finish to cleanup interfaces")
+	return errors.Join(errs...)
+}
+
+func (m *InterfaceManager) cleanupNetworkInfrastructure() error {
+	var errs []error
+	if mgr, ok := NetworkManagers[m.natBackend]; !ok {
+		errs = append(errs, fmt.Errorf("no corresponding network manager for natBackend: %s", m.natBackend))
+	} else if err := mgr.CleanupSNATRules(m.IpRange); err != nil {
+		errs = append(errs, fmt.Errorf("cleanup SNAT rules for %s: %w", m.IpRange, err))
+	}
+
+	if m.bridgeLink == nil {
+		return errors.Join(errs...)
+	}
+	current, err := m.links().LinkByName(BridgeName)
+	if err != nil {
+		var notFound netlink.LinkNotFoundError
+		if !errors.As(err, &notFound) {
+			errs = append(errs, fmt.Errorf("find bridge %s: %w", BridgeName, err))
+		}
+		return errors.Join(errs...)
+	}
+	if current == nil {
+		return errors.Join(errs...)
+	}
+	expectedIndex := m.bridgeLink.Attrs().Index
+	currentIndex := current.Attrs().Index
+	if expectedIndex != 0 && currentIndex != expectedIndex {
+		errs = append(
+			errs,
+			fmt.Errorf(
+				"refusing to delete replacement bridge %s: expected index %d, got %d",
+				BridgeName,
+				expectedIndex,
+				currentIndex,
+			),
+		)
+		return errors.Join(errs...)
+	}
+	if err := m.links().LinkDel(current); err != nil {
+		errs = append(errs, fmt.Errorf("delete bridge %s: %w", BridgeName, err))
+	}
+	return errors.Join(errs...)
 }
 
 func NewInterfaceManager(db store.DbStore, ipRange string, size int, cacheSize int, natBackend string) (*InterfaceManager, error) {
@@ -440,7 +528,7 @@ func NewInterfaceManager(db store.DbStore, ipRange string, size int, cacheSize i
 	}
 
 	if err := initBridge(ipRange, natBackend); err != nil {
-		if cleanErr := cleanBridge(natBackend); cleanErr != nil {
+		if cleanErr := cleanBridge(ipRange, natBackend); cleanErr != nil {
 			logrus.Warnf("clean bridge after init failed: %v", cleanErr)
 		}
 		return nil, err
@@ -468,11 +556,19 @@ func NewInterfaceManager(db store.DbStore, ipRange string, size int, cacheSize i
 		interfaces:      util.New[string](""),
 		usingInterfaces: usingInterfaces,
 		bridgeLink:      bridgeLink,
+		natBackend:      natBackend,
 		mask:            mask,
 		storeMark:       atomic.Bool{},
+		stopCh:          make(chan struct{}),
+		runDoneCh:       make(chan struct{}),
+		storeDoneCh:     make(chan struct{}),
 	}
 
 	if err = manager.load(ips); err != nil {
+		cleanupErr := errors.Join(manager.cleanup(), manager.cleanupNetworkInfrastructure())
+		if cleanupErr != nil {
+			return nil, errors.Join(err, fmt.Errorf("rollback network initialization: %w", cleanupErr))
+		}
 		return nil, err
 	}
 	manager.total = manager.usingInterfaces.Count() + manager.interfaces.Length()
@@ -660,27 +756,29 @@ func initBridge(ipRange string, natBackend string) error {
 }
 
 // cleanBridge is used to clean bridge and iptable rule after init failed.
-func cleanBridge(natBackend string) error {
-	// clean bridge if exists.
-	if bridge, err := netlink.LinkByName(BridgeName); err != nil {
-		if !strings.Contains(err.Error(), "not found") {
-			return nil
+func cleanBridge(ipRange string, natBackend string) error {
+	var errs []error
+	bridge, err := netlink.LinkByName(BridgeName)
+	if err == nil {
+		if err := netlink.LinkDel(bridge); err != nil {
+			errs = append(errs, fmt.Errorf("delete bridge %s: %w", BridgeName, err))
 		}
 	} else {
-		if err = netlink.LinkDel(bridge); err != nil {
-			return err
+		var notFound netlink.LinkNotFoundError
+		if !errors.As(err, &notFound) {
+			errs = append(errs, fmt.Errorf("find bridge %s: %w", BridgeName, err))
 		}
 	}
 
 	if mgr, ok := NetworkManagers[natBackend]; !ok {
-		return fmt.Errorf("no corresponding network manager for natBackend: %s", natBackend)
+		errs = append(errs, fmt.Errorf("no corresponding network manager for natBackend: %s", natBackend))
 	} else {
-		if err := mgr.CleanupSNATRules(defaultIpRange); err != nil {
-			return err
+		if err := mgr.CleanupSNATRules(ipRange); err != nil {
+			errs = append(errs, fmt.Errorf("cleanup SNAT rules for %s: %w", ipRange, err))
 		}
 	}
 
-	return nil
+	return errors.Join(errs...)
 }
 
 // createDevice adds one veth pair and returns the peer link. Thread not safe;

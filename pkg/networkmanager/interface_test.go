@@ -21,13 +21,15 @@ import (
 
 	gomonkey "github.com/agiledragon/gomonkey/v2"
 	"github.com/inclusionAI/sandboxd/internal/util"
+	cmap "github.com/orcaman/concurrent-map/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/vishvananda/netlink"
 )
 
 func initInterfaceCacheForCleanup() *InterfaceManager {
 	im := &InterfaceManager{
-		interfaces: util.New(""),
+		interfaces:      util.New(""),
+		usingInterfaces: cmap.New[struct{}](),
 	}
 
 	im.interfaces.Push(`{"interface":{"Index":21298,"MTU":1500,"Name":"pv.ac1100ad","HardwareAddr":"+gJCgdfr","Flags":51},"ip":"172.17.0.173","mask":"//8AAA==","gateway":"172.17.0.1","type":"bridge"}`)
@@ -35,6 +37,31 @@ func initInterfaceCacheForCleanup() *InterfaceManager {
 	im.interfaces.Push("invalid interface")
 
 	return im
+}
+
+func TestInterfaceCleanupIncludesLeasedInterfaces(t *testing.T) {
+	m := &InterfaceManager{
+		interfaces:      util.New(""),
+		usingInterfaces: cmap.New[struct{}](),
+	}
+	idle := `{"interface":{"Name":"pv.ac1100ad"},"ip":"172.17.0.173","type":"bridge"}`
+	using := `{"interface":{"Name":"pv.ac1100ae"},"ip":"172.17.0.174","type":"bridge"}`
+	m.interfaces.Push(idle)
+	m.usingInterfaces.Set(using, struct{}{})
+
+	var destroyed []string
+	patch := gomonkey.ApplyPrivateMethod(
+		m,
+		"destroyDevice",
+		func(_ *InterfaceManager, device net.Interface) error {
+			destroyed = append(destroyed, device.Name)
+			return nil
+		},
+	)
+	defer patch.Reset()
+
+	assert.NoError(t, m.cleanup())
+	assert.ElementsMatch(t, []string{"pv.ac1100ad", "pv.ac1100ae"}, destroyed)
 }
 
 func TestInterfaceCleanup(t *testing.T) {
@@ -56,7 +83,8 @@ func TestInterfaceCleanup(t *testing.T) {
 
 func TestInterfaceCleanup_IgnoresResourceWithoutInterface(t *testing.T) {
 	m := &InterfaceManager{
-		interfaces: util.New(""),
+		interfaces:      util.New(""),
+		usingInterfaces: cmap.New[struct{}](),
 	}
 	m.interfaces.Push((&NetResource{
 		Ip:      net.ParseIP("172.17.0.173"),
@@ -129,6 +157,90 @@ type fakeLinkOperations struct {
 	deleteErr  error
 	lookupName string
 	deleted    netlink.Link
+}
+
+type cleanupNetworkManager struct {
+	cleanedRanges []string
+	cleanupErr    error
+}
+
+func (*cleanupNetworkManager) SetupSNATRules(string) error { return nil }
+func (m *cleanupNetworkManager) CleanupSNATRules(ipRange string) error {
+	m.cleanedRanges = append(m.cleanedRanges, ipRange)
+	return m.cleanupErr
+}
+func (*cleanupNetworkManager) SetupNetworkRulesForActivating(net.IP, string) error { return nil }
+func (*cleanupNetworkManager) CleanupNetworkRulesForActivating(net.IP) error       { return nil }
+func (*cleanupNetworkManager) SetupDNATRule(string, uint16, string, uint16) error  { return nil }
+func (*cleanupNetworkManager) CleanupDNATRule(string, uint16, string, uint16) error {
+	return nil
+}
+
+func TestInterfaceShutdownCleansSNATAndOwnedBridge(t *testing.T) {
+	const backend = "shutdown-cleanup-test"
+	nat := &cleanupNetworkManager{}
+	NetworkManagers[backend] = nat
+	t.Cleanup(func() {
+		delete(NetworkManagers, backend)
+	})
+
+	bridge := &netlink.Bridge{
+		LinkAttrs: netlink.LinkAttrs{Name: BridgeName, Index: 42},
+	}
+	links := &fakeLinkOperations{link: bridge}
+	m := &InterfaceManager{
+		interfaces:      util.New(""),
+		usingInterfaces: cmap.New[struct{}](),
+		idleIp:          util.New(""),
+		createReqs:      make(chan *createRequest, 1),
+		IpRange:         "172.30.252.1/22",
+		bridgeLink:      bridge,
+		linkOps:         links,
+		natBackend:      backend,
+		stopCh:          make(chan struct{}),
+		runDoneCh:       make(chan struct{}),
+		storeDoneCh:     make(chan struct{}),
+	}
+	m.keepStoring()
+	go m.run()
+
+	assert.NoError(t, m.ShutDown())
+	assert.Equal(t, []string{"172.30.252.1/22"}, nat.cleanedRanges)
+	assert.Same(t, bridge, links.deleted)
+
+	// Shutdown is idempotent: a second call must not touch host networking.
+	assert.NoError(t, m.ShutDown())
+	assert.Len(t, nat.cleanedRanges, 1)
+}
+
+func TestInterfaceShutdownRefusesReplacementBridge(t *testing.T) {
+	const backend = "shutdown-replacement-test"
+	nat := &cleanupNetworkManager{}
+	NetworkManagers[backend] = nat
+	t.Cleanup(func() {
+		delete(NetworkManagers, backend)
+	})
+
+	owned := &netlink.Bridge{
+		LinkAttrs: netlink.LinkAttrs{Name: BridgeName, Index: 42},
+	}
+	replacement := &netlink.Bridge{
+		LinkAttrs: netlink.LinkAttrs{Name: BridgeName, Index: 43},
+	}
+	links := &fakeLinkOperations{link: replacement}
+	m := &InterfaceManager{
+		interfaces:      util.New(""),
+		usingInterfaces: cmap.New[struct{}](),
+		IpRange:         "172.30.252.1/22",
+		bridgeLink:      owned,
+		linkOps:         links,
+		natBackend:      backend,
+	}
+
+	err := m.ShutDown()
+	assert.ErrorContains(t, err, "refusing to delete replacement bridge")
+	assert.Equal(t, []string{"172.30.252.1/22"}, nat.cleanedRanges)
+	assert.Nil(t, links.deleted)
 }
 
 func (f *fakeLinkOperations) LinkByName(name string) (netlink.Link, error) {

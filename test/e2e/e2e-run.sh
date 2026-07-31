@@ -52,6 +52,31 @@ fail() {
     exit 1
 }
 
+select_iptables_backend() {
+    if iptables -t nat -L >/dev/null 2>&1; then
+        return
+    fi
+
+    local backend
+    local binary
+    local ip6_binary
+    for backend in nft legacy; do
+        binary="/usr/sbin/iptables-${backend}"
+        ip6_binary="/usr/sbin/ip6tables-${backend}"
+        if [ ! -x "${binary}" ] || ! "${binary}" -t nat -L >/dev/null 2>&1; then
+            continue
+        fi
+        update-alternatives --set iptables "${binary}" >/dev/null
+        if [ -x "${ip6_binary}" ]; then
+            update-alternatives --set ip6tables "${ip6_binary}" >/dev/null
+        fi
+        log "selected iptables ${backend} backend"
+        return
+    done
+
+    iptables -t nat -L || fail "iptables nat table is not usable"
+}
+
 cleanup_cgroups() {
     if [ "${DISABLE_CGROUP}" = "1" ]; then
         return
@@ -143,7 +168,7 @@ preflight() {
         log "detected ${CGROUP_MODE}"
     fi
 
-    iptables -t nat -L >/dev/null || fail "iptables nat table is not usable"
+    select_iptables_backend
 }
 
 write_config() {
