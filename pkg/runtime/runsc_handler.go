@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"github.com/inclusionAI/sandboxd/internal/trace"
@@ -90,13 +91,17 @@ func (r *RunscHandler) Start(ctx context.Context, config StartConfig) error {
 		return fmt.Errorf("network is required")
 	}
 
+	rootOverlay, rootOverlaySize, err := r.resolveRootOverlay(config.WritableLayerLimitBytes)
+	if err != nil {
+		return err
+	}
 	bundlePath, ociSpec, err := r.ociLoader.GenerateOci(OciLoadOptions{
 		SandboxID:                       config.ID,
 		Config:                          config,
 		CgroupPath:                      config.CgroupPath,
 		UseGVisorRootfsImageAnnotations: true,
 		RootfsOverlayDir:                r.filestoreDir,
-		RootfsOverlayTmpfsSize:          r.rootfsOverlayTmpfsSize,
+		RootfsOverlaySize:               rootOverlaySize,
 	})
 	if err != nil {
 		return fmt.Errorf("generate OCI bundle: %w", err)
@@ -110,10 +115,11 @@ func (r *RunscHandler) Start(ctx context.Context, config StartConfig) error {
 	}
 
 	startArgs := runscapi.StartArgs{
-		ID:         config.ID,
-		BundleDir:  bundlePath,
-		UserStdout: config.Stdout,
-		UserStderr: config.Stderr,
+		ID:          config.ID,
+		BundleDir:   bundlePath,
+		UserStdout:  config.Stdout,
+		UserStderr:  config.Stderr,
+		RootOverlay: rootOverlay,
 		Network: runscapi.NetworkConfig{
 			Interface: config.Network.Interface,
 			IP:        config.Network.Ip,
@@ -137,6 +143,17 @@ func (r *RunscHandler) Start(ctx context.Context, config StartConfig) error {
 	}
 	logrus.WithField(trace.ContextKeyTraceId, traceID).Debugf("call runsc create/start, args: %+v, cost: %v", startArgs, time.Since(start))
 	return nil
+}
+
+func (r *RunscHandler) resolveRootOverlay(limitBytes uint64) (string, string, error) {
+	if r.filestoreDir == "" {
+		return "", "", errors.New("writable layers require a configured filestore directory")
+	}
+	size := r.rootfsOverlayTmpfsSize
+	if limitBytes > 0 {
+		size = strconv.FormatUint(limitBytes, 10)
+	}
+	return runscapi.RootFileOverlay(r.filestoreDir, size), size, nil
 }
 
 func (r *RunscHandler) Delete(ctx context.Context, sandboxID string) error {

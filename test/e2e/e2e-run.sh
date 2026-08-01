@@ -533,6 +533,39 @@ run_stress_checks() {
     log "stress checks passed"
 }
 
+run_storage_quota_check() {
+    log "testing writable-layer storage quota"
+    SANDBOX_ID="$(sbox_cmd start \
+        --quiet \
+        --runtime runsc \
+        --sandbox-id sbox-e2e-storage \
+        --rootfs "${ROOTFS}" \
+        --storage-mb 16 \
+        /bin/sleep 300)"
+    [ -n "${SANDBOX_ID}" ] || fail "storage quota start returned empty sandbox id"
+
+    local got
+    got="$(sbox_cmd exec "${SANDBOX_ID}" /bin/sh -c \
+        'dd if=/dev/zero of=/tmp/within-quota bs=1M count=1 2>/dev/null && wc -c < /tmp/within-quota')"
+    assert_eq "${got}" "1048576" "write below storage quota"
+
+    if sbox_cmd exec "${SANDBOX_ID}" /bin/sh -c \
+        'dd if=/dev/zero of=/tmp/over-quota bs=1M count=32' \
+        >/tmp/sbox-storage-quota.log 2>&1; then
+        cat /tmp/sbox-storage-quota.log >&2
+        fail "write above storage quota unexpectedly succeeded"
+    fi
+    if ! grep -qi "No space left on device" /tmp/sbox-storage-quota.log; then
+        cat /tmp/sbox-storage-quota.log >&2
+        fail "write above storage quota did not return ENOSPC"
+    fi
+
+    sbox_cmd exec "${SANDBOX_ID}" /bin/rm -f /tmp/within-quota /tmp/over-quota
+
+    sbox_cmd delete "${SANDBOX_ID}"
+    SANDBOX_ID=""
+}
+
 run_checks() {
     log "starting sandbox"
     SANDBOX_ID="$(sbox_cmd start \
@@ -585,6 +618,8 @@ run_checks() {
         cat /tmp/sbox-inspect-after-delete.log >&2
         fail "sandbox still inspectable after delete"
     fi
+
+    run_storage_quota_check
 
     log "starting immediate OOM sandbox"
     SANDBOX_ID="$(sbox_cmd start \
@@ -680,6 +715,8 @@ run_cgroup_disabled_checks() {
 
     sbox_cmd delete "${SANDBOX_ID}"
     SANDBOX_ID=""
+
+    run_storage_quota_check
 }
 
 run_e2e() {

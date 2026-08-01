@@ -64,6 +64,10 @@ message RootfsConfig {
     // Path is a local directory or file used as the root filesystem source.
     string path = 5;
   }
+  // WritableLayerSizeBytes is a compatibility alias used by existing
+  // Function Proxy clients. sandboxd normalizes it to the start request's
+  // writable_layer_limit_bytes field.
+  uint64 writable_layer_size_bytes = 6;
 }
 
 // Mount describes an additional mount attached to the sandbox.
@@ -134,6 +138,9 @@ message StartRequest {
   map<string, string> metric_labels = 17;
   // XpuAllocations contains concrete accelerator devices assigned to the sandbox.
   repeated XpuAllocation xpu_allocations = 18;
+  // WritableLayerLimitBytes is the hard quota for the writable root filesystem
+  // layer. Zero preserves the node-configured default for older clients.
+  uint64 writable_layer_limit_bytes = 19;
 }
 
 // StartResponse is returned after sandbox start.

@@ -44,10 +44,14 @@ type Module struct {
 	nodeResource NodeResourceManager
 	sockPath     string
 
-	mu       sync.RWMutex
-	availCpu int64
-	availMem int64
-	xpu      xpuProvider
+	mu                        sync.RWMutex
+	availCpu                  int64
+	availMem                  int64
+	xpu                       xpuProvider
+	ephemeralStorage          ephemeralStorageProvider
+	ephemeralStorageCapacity  uint64
+	ephemeralStorageAvailable uint64
+	ephemeralStorageReady     bool
 
 	lastRefresh atomic.Int64 // unix-nano of most recent successful refresh
 	listener    net.Listener
@@ -60,17 +64,24 @@ type Module struct {
 }
 
 // resourceInfo is the JSON payload served by the /resource endpoint. CPU is
-// reported in cores; memory is reported in bytes.
+// reported in scheduler cores, while memory and writable storage use bytes.
 type resourceInfo struct {
-	Cpu int64                 `json:"cpu"`
-	Mem int64                 `json:"mem"`
-	Xpu []xpumanager.Resource `json:"xpu"`
+	Cpu      int64                 `json:"cpu"`
+	Mem      int64                 `json:"mem"`
+	Xpu      []xpumanager.Resource `json:"xpu"`
+	Storage  *uint64               `json:"storage,omitempty"`
+	Features []string              `json:"features"`
 }
 
 type xpuProvider interface {
 	Resources() []xpumanager.Resource
 }
 
+type ephemeralStorageProvider interface {
+	EphemeralStorageCapacity() (capacityBytes, allocatableBytes uint64, err error)
+}
+
+const storageQuotaFeature = "storage-quota-v1"
 // NewModule constructs the configured node-resource module. sockPath is the
 // Unix socket exposed to the external collector.
 func NewModule(sockPath, provider string) (*Module, error) {
@@ -116,6 +127,17 @@ func (m *Module) SetXPUProvider(provider xpuProvider) {
 	m.xpu = provider
 }
 
+// SetEphemeralStorageProvider adds gVisor writable-layer capacity and its
+// capability marker to /resource. The first refresh is synchronous so a
+// scheduler querying immediately after sandboxd startup sees a complete node
+// resource snapshot.
+func (m *Module) SetEphemeralStorageProvider(provider ephemeralStorageProvider) {
+	m.mu.Lock()
+	m.ephemeralStorage = provider
+	m.mu.Unlock()
+	m.refreshEphemeralStorage()
+}
+
 // SetCgroupStatsReader routes all cgroup-backed OTel metrics through the
 // CgroupManager's auto-selected v1/v2 implementation.
 func (m *Module) SetCgroupStatsReader(
@@ -149,12 +171,18 @@ func (m *Module) Start() error {
 	mux.HandleFunc("/resource", func(w http.ResponseWriter, r *http.Request) {
 		m.mu.RLock()
 		info := resourceInfo{
-			Cpu: m.availCpu,
-			Mem: m.availMem,
-			Xpu: []xpumanager.Resource{},
+			Cpu:      m.availCpu,
+			Mem:      m.availMem,
+			Xpu:      []xpumanager.Resource{},
+			Features: []string{},
 		}
 		if m.xpu != nil {
 			info.Xpu = m.xpu.Resources()
+		}
+		if m.ephemeralStorageReady {
+			storageBytes := m.ephemeralStorageAvailable
+			info.Storage = &storageBytes
+			info.Features = append(info.Features, storageQuotaFeature)
 		}
 		m.mu.RUnlock()
 		body, _ := json.Marshal(info)
@@ -264,4 +292,29 @@ func (m *Module) refreshOnce() {
 	m.mu.Unlock()
 	m.lastRefresh.Store(time.Now().UnixNano())
 	logrus.Debugf("resourcemanager: avail cpu=%d cores mem=%d bytes", cpu, mem)
+	m.refreshEphemeralStorage()
+}
+
+func (m *Module) refreshEphemeralStorage() {
+	m.mu.RLock()
+	provider := m.ephemeralStorage
+	m.mu.RUnlock()
+	if provider == nil {
+		return
+	}
+	capacity, allocatable, err := provider.EphemeralStorageCapacity()
+	if err != nil {
+		logrus.Errorf("resourcemanager: ephemeral storage refresh failed: %v", err)
+		return
+	}
+	m.mu.Lock()
+	m.ephemeralStorageCapacity = capacity
+	m.ephemeralStorageAvailable = allocatable
+	m.ephemeralStorageReady = true
+	m.mu.Unlock()
+	logrus.Debugf(
+		"resourcemanager: ephemeral storage capacity=%d bytes allocatable=%d bytes",
+		capacity,
+		allocatable,
+	)
 }

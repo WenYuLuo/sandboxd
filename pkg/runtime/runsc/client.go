@@ -54,11 +54,12 @@ type Options struct {
 }
 
 type StartArgs struct {
-	ID         string
-	BundleDir  string
-	UserStdout string
-	UserStderr string
-	Network    NetworkConfig
+	ID          string
+	BundleDir   string
+	UserStdout  string
+	UserStderr  string
+	RootOverlay string
+	Network     NetworkConfig
 }
 
 func NewClient(binary, rootDir string) *Client {
@@ -115,10 +116,11 @@ func (c *Client) Create(ctx context.Context, args StartArgs) error {
 	if c.Options.DebugLogPath != "" {
 		cmdArgs = append(cmdArgs, "-debug-log="+c.Options.DebugLogPath)
 	}
-	cmdArgs = append(cmdArgs, "--overlay2="+rootFileOverlay(
-		c.Options.FilestoreDir,
-		c.Options.OverlayTmpfsSize,
-	))
+	rootOverlay := args.RootOverlay
+	if rootOverlay == "" {
+		rootOverlay = RootFileOverlay(c.Options.FilestoreDir, c.Options.OverlayTmpfsSize)
+	}
+	cmdArgs = append(cmdArgs, "--overlay2="+rootOverlay)
 	cmdArgs = append(cmdArgs, "create")
 	cmdArgs = append(cmdArgs,
 		"--bundle", args.BundleDir,
@@ -144,7 +146,8 @@ func (c *Client) Create(ctx context.Context, args StartArgs) error {
 	return nil
 }
 
-func rootFileOverlay(dir, size string) string {
+// RootFileOverlay returns a writable root overlay backed by dir.
+func RootFileOverlay(dir, size string) string {
 	overlay := "root:dir=" + dir
 	if size == "" {
 		return overlay

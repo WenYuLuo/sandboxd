@@ -17,6 +17,7 @@ package resourcemanager
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net"
 	"net/http"
 	"path/filepath"
@@ -37,6 +38,15 @@ type stubNodeResourceManager struct {
 
 type stubXPUProvider struct {
 	resources []xpumanager.Resource
+}
+
+type stubEphemeralStorageProvider struct {
+	capacity    uint64
+	allocatable uint64
+}
+
+func (s stubEphemeralStorageProvider) EphemeralStorageCapacity() (uint64, uint64, error) {
+	return s.capacity, s.allocatable, nil
 }
 
 func (s stubXPUProvider) Resources() []xpumanager.Resource {
@@ -84,6 +94,10 @@ func TestModuleServesAvailableResourceOverUnixSocket(t *testing.T) {
 		}}},
 	}
 	require.NoError(t, m.Start())
+	m.SetEphemeralStorageProvider(stubEphemeralStorageProvider{
+		capacity:    200 << 30,
+		allocatable: 150 << 30,
+	})
 
 	client := &http.Client{Transport: &http.Transport{
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
@@ -96,11 +110,27 @@ func TestModuleServesAvailableResourceOverUnixSocket(t *testing.T) {
 			return false
 		}
 		defer resp.Body.Close()
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return false
+		}
 		var info resourceInfo
-		if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
+		if err := json.Unmarshal(body, &info); err != nil {
+			return false
+		}
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(body, &fields); err != nil {
+			return false
+		}
+		if _, ok := fields["storage"]; !ok {
+			return false
+		}
+		if _, ok := fields["ephemeral_storage"]; ok {
 			return false
 		}
 		return info.Cpu == 2 && info.Mem == 5<<30 &&
+			assert.Equal(t, uint64(150<<30), *info.Storage) &&
+			assert.Equal(t, []string{storageQuotaFeature}, info.Features) &&
 			assert.Equal(t, []xpumanager.Resource{{
 				Type:         "gpu",
 				ProductModel: "l20",

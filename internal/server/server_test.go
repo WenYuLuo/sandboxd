@@ -178,6 +178,57 @@ func TestStatsFailsWhenCgroupManagementIsDisabled(t *testing.T) {
 	assert.Equal(t, codes.FailedPrecondition, status.Code(err))
 }
 
+func TestStartRejectsWritableLayerLimitForKata(t *testing.T) {
+	s := newTestService(t, map[string]svc.Handler{
+		config.RuntimeNameKata: svc.NewFakeRuntimeHandler(),
+	})
+	_, err := s.Start(context.Background(), &runtime.StartRequest{
+		Runtime:                 config.RuntimeNameKata,
+		Rootfs:                  &runtime.RootfsConfig{},
+		WritableLayerLimitBytes: 1 << 30,
+	})
+	assert.Equal(t, codes.InvalidArgument, status.Code(err))
+}
+
+func TestStartRejectsWritableLayerLimitWithoutFilestore(t *testing.T) {
+	s := newTestService(t, map[string]svc.Handler{
+		config.RuntimeNameRunsc: svc.NewFakeRuntimeHandler(),
+	})
+	_, err := s.Start(context.Background(), &runtime.StartRequest{
+		Runtime:                 config.RuntimeNameRunsc,
+		Rootfs:                  &runtime.RootfsConfig{},
+		WritableLayerLimitBytes: 1 << 30,
+	})
+	assert.Equal(t, codes.FailedPrecondition, status.Code(err))
+}
+
+func TestStartNormalizesRootfsWritableLayerLimit(t *testing.T) {
+	s := newTestService(t, map[string]svc.Handler{
+		config.RuntimeNameKata: svc.NewFakeRuntimeHandler(),
+	})
+	_, err := s.Start(context.Background(), &runtime.StartRequest{
+		Runtime: config.RuntimeNameKata,
+		Rootfs: &runtime.RootfsConfig{
+			WritableLayerSizeBytes: 1 << 30,
+		},
+	})
+	assert.Equal(t, codes.InvalidArgument, status.Code(err))
+}
+
+func TestStartRejectsConflictingWritableLayerLimits(t *testing.T) {
+	s := newTestService(t, map[string]svc.Handler{
+		config.RuntimeNameRunsc: svc.NewFakeRuntimeHandler(),
+	})
+	_, err := s.Start(context.Background(), &runtime.StartRequest{
+		Runtime: config.RuntimeNameRunsc,
+		Rootfs: &runtime.RootfsConfig{
+			WritableLayerSizeBytes: 2 << 30,
+		},
+		WritableLayerLimitBytes: 1 << 30,
+	})
+	assert.Equal(t, codes.InvalidArgument, status.Code(err))
+}
+
 func TestList_ById_NotFound(t *testing.T) {
 	s := newTestService(t, map[string]svc.Handler{
 		"runsc": svc.NewFakeRuntimeHandler(),

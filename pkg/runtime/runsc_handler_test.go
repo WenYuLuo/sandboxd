@@ -74,9 +74,11 @@ func TestRunscHandlerDoesNotPrepareNVProxyRootfsForGenericSpecUpdates(t *testing
 	}
 
 	handler := &RunscHandler{
-		runsc:       successfulRunscClient{},
-		ociLoader:   staticOciLoader{bundlePath: bundlePath, spec: &Spec{Root: &Root{Path: t.TempDir()}}},
-		sandboxRoot: bundleRoot,
+		runsc:                  successfulRunscClient{},
+		ociLoader:              staticOciLoader{bundlePath: bundlePath, spec: &Spec{Root: &Root{Path: t.TempDir()}}},
+		rootfsOverlayTmpfsSize: "10G",
+		filestoreDir:           t.TempDir(),
+		sandboxRoot:            bundleRoot,
 	}
 	err := handler.Start(context.Background(), StartConfig{
 		ID:          "sbox-generic-updates",
@@ -154,3 +156,22 @@ func (successfulRunscClient) Start(context.Context, runscapi.StartArgs) error  {
 func (successfulRunscClient) Wait(context.Context, string) (int, error)        { return 0, nil }
 func (successfulRunscClient) Delete(context.Context, string, bool) error       { return nil }
 func (successfulRunscClient) ListJSON(context.Context) ([]byte, error)         { return []byte("[]"), nil }
+
+func TestRunscHandlerResolvesWritableLayerOverlay(t *testing.T) {
+	rootDir := filepath.Join(t.TempDir(), "sandboxd", "root")
+	cfg := config.Config{RootDir: rootDir}
+	cfg.RuntimeConfig.FilestoreDir = "/home/akernel/xfs"
+	cfg.RuntimeConfig.OverlayTmpfsSize = "10G"
+	handler, err := NewRunscHandler(cfg, "/usr/local/bin/runsc", nil)
+	assert.NoError(t, err)
+
+	overlay, size, err := handler.resolveRootOverlay(2 << 30)
+	assert.NoError(t, err)
+	assert.Equal(t, "root:dir=/home/akernel/xfs,size=2147483648", overlay)
+	assert.Equal(t, "2147483648", size)
+
+	overlay, size, err = handler.resolveRootOverlay(0)
+	assert.NoError(t, err)
+	assert.Equal(t, "root:dir=/home/akernel/xfs,size=10G", overlay)
+	assert.Equal(t, "10G", size)
+}

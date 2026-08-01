@@ -36,20 +36,21 @@ type Handler interface {
 }
 
 type StartConfig struct {
-	ID            string
-	Command       []string
-	Mounts        []*runtime.Mount
-	Rootfs        string
-	Resources     *runtime.LinuxSandboxResources
-	Envs          []*runtime.KeyValue
-	Stdout        string
-	Stderr        string
-	Cwd           string
-	CgroupPath    string
-	Annotations   map[string]string
-	Network       *networkmanager.NetResource
-	DisableCgroup bool
-	SpecUpdates   *SpecUpdates
+	ID                      string
+	Command                 []string
+	Mounts                  []*runtime.Mount
+	Rootfs                  string
+	Resources               *runtime.LinuxSandboxResources
+	Envs                    []*runtime.KeyValue
+	Stdout                  string
+	Stderr                  string
+	Cwd                     string
+	CgroupPath              string
+	Annotations             map[string]string
+	Network                 *networkmanager.NetResource
+	DisableCgroup           bool
+	SpecUpdates             *SpecUpdates
+	WritableLayerLimitBytes uint64
 }
 
 // SpecUpdates contains provider-resolved OCI changes. Device providers use

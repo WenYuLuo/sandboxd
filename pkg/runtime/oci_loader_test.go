@@ -201,7 +201,7 @@ func TestGenerateOciRejectsEscapingSandboxID(t *testing.T) {
 	}
 }
 
-func TestGenerateOciUsesFileBackedRootfsImageOverlay(t *testing.T) {
+func TestGenerateOciUsesDiskBackedRootfsImageOverlay(t *testing.T) {
 	bundleRoot := t.TempDir()
 	rootfsImage := filepath.Join(t.TempDir(), "rootfs.img")
 	if err := os.WriteFile(rootfsImage, []byte("erofs-placeholder"), 0644); err != nil {
@@ -211,18 +211,18 @@ func TestGenerateOciUsesFileBackedRootfsImageOverlay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	loader.baseSpec.Root.Readonly = false
 	filestoreDir := filepath.Join(t.TempDir(), "filestore")
 	_, spec, err := loader.GenerateOci(OciLoadOptions{
 		SandboxID:  "sandbox-storage",
 		CgroupPath: "/sandbox/storage",
 		Config: StartConfig{
-			Rootfs:    rootfsImage,
-			Resources: &runtime.LinuxSandboxResources{},
+			Rootfs:                  rootfsImage,
+			Resources:               &runtime.LinuxSandboxResources{},
+			WritableLayerLimitBytes: 1 << 30,
 		},
 		UseGVisorRootfsImageAnnotations: true,
 		RootfsOverlayDir:                filestoreDir,
-		RootfsOverlayTmpfsSize:          "10G",
+		RootfsOverlaySize:               "1073741824",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -230,7 +230,7 @@ func TestGenerateOciUsesFileBackedRootfsImageOverlay(t *testing.T) {
 	if got := spec.Annotations[gvisorRootfsAnnotationPrefix+"overlay"]; got != "dir="+filestoreDir {
 		t.Fatalf("rootfs overlay annotation = %q", got)
 	}
-	if got := spec.Annotations[gvisorRootfsAnnotationPrefix+"options"]; got != "size=10G" {
+	if got := spec.Annotations[gvisorRootfsAnnotationPrefix+"options"]; got != "size=1073741824" {
 		t.Fatalf("rootfs options annotation = %q", got)
 	}
 	if spec.Root.Path != "rootfs" {

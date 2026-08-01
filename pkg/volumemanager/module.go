@@ -15,8 +15,10 @@
 package volumemanager
 
 import (
+	"fmt"
 	"os"
 	"sync/atomic"
+	"syscall"
 
 	"github.com/sirupsen/logrus"
 )
@@ -84,6 +86,23 @@ func (m *Module) Healthy() bool {
 		return true
 	}
 	return m.xfsMounted.Load()
+}
+
+// EphemeralStorageCapacity reports the total and currently available bytes on
+// the filesystem that backs gVisor writable-layer filestores.
+func (m *Module) EphemeralStorageCapacity() (uint64, uint64, error) {
+	if m.FilestoreDir == "" {
+		return 0, 0, fmt.Errorf("filestore_dir is not configured")
+	}
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs(m.FilestoreDir, &stat); err != nil {
+		return 0, 0, fmt.Errorf("statfs %s: %w", m.FilestoreDir, err)
+	}
+	if stat.Bsize <= 0 {
+		return 0, 0, fmt.Errorf("statfs %s returned invalid block size %d", m.FilestoreDir, stat.Bsize)
+	}
+	blockSize := uint64(stat.Bsize)
+	return stat.Blocks * blockSize, stat.Bavail * blockSize, nil
 }
 
 // errMissingSize is a typed sentinel so callers / tests can distinguish a

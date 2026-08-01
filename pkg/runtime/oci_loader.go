@@ -57,7 +57,7 @@ type OciLoadOptions struct {
 
 	UseGVisorRootfsImageAnnotations bool
 	RootfsOverlayDir                string
-	RootfsOverlayTmpfsSize          string
+	RootfsOverlaySize               string
 }
 
 var _ OciLoader = &BundleLoader{}
@@ -132,6 +132,12 @@ func (r *BundleLoader) GenerateOci(options OciLoadOptions) (string, *Spec, error
 		ociSpec.Root = &Root{}
 	}
 	ociSpec.Root.Path = options.Config.Rootfs
+	if options.Config.WritableLayerLimitBytes > 0 {
+		// An explicit writable-layer quota necessarily requests a writable root.
+		// The image itself remains read-only; writes go to the quota-limited
+		// gVisor overlay selected below.
+		ociSpec.Root.Readonly = false
+	}
 
 	ociSpec.Annotations = combineAnnotations(ociSpec.Annotations, options.Config.Annotations)
 
@@ -160,7 +166,7 @@ func (r *BundleLoader) GenerateOci(options OciLoadOptions) (string, *Spec, error
 			ociSpec,
 			bundleDir,
 			options.RootfsOverlayDir,
-			options.RootfsOverlayTmpfsSize,
+			options.RootfsOverlaySize,
 		); err != nil {
 			return "", ociSpec, err
 		}
@@ -200,7 +206,7 @@ func applyGVisorRootfsImageAnnotations(
 	spec *Spec,
 	bundleDir string,
 	overlayDir string,
-	overlayTmpfsSize string,
+	overlaySize string,
 ) error {
 	if spec.Root == nil || spec.Root.Path == "" {
 		return nil
@@ -241,8 +247,8 @@ func applyGVisorRootfsImageAnnotations(
 			return errors.New("gVisor writable rootfs image requires a filestore directory")
 		}
 		spec.Annotations[gvisorRootfsAnnotationPrefix+"overlay"] = gvisorRootfsOverlayDirPrefix + overlayDir
-		if overlayTmpfsSize != "" {
-			spec.Annotations[gvisorRootfsAnnotationPrefix+"options"] = "size=" + overlayTmpfsSize
+		if overlaySize != "" {
+			spec.Annotations[gvisorRootfsAnnotationPrefix+"options"] = "size=" + overlaySize
 		}
 	}
 	spec.Root.Path = placeholderRootfs

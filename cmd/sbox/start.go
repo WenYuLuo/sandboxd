@@ -75,6 +75,10 @@ var StartCmd = cli.Command{
 			Name:  "memory-mb",
 			Usage: "memory limit in MB",
 		},
+		cli.Uint64Flag{
+			Name:  "storage-mb",
+			Usage: "writable root filesystem quota in MiB",
+		},
 		cli.StringSliceFlag{
 			Name:  "port",
 			Usage: "DNAT rule, formatted as protocol:dstPort:targetPort",
@@ -117,6 +121,10 @@ var StartCmd = cli.Command{
 		if err != nil {
 			return err
 		}
+		writableLayerLimitBytes, err := storageMBToBytes(context.Uint64("storage-mb"))
+		if err != nil {
+			return err
+		}
 
 		resources := make(map[string]float64)
 		if cpu := context.Float64("cpu-millicores"); cpu > 0 {
@@ -142,16 +150,17 @@ var StartCmd = cli.Command{
 					Path: context.String("rootfs"),
 				},
 			},
-			Command:        command,
-			Cwd:            context.String("cwd"),
-			Envs:           envs,
-			Mounts:         mounts,
-			Resources:      resources,
-			Stdout:         context.String("stdout"),
-			Stderr:         context.String("stderr"),
-			Network:        "sandbox",
-			Ports:          context.StringSlice("port"),
-			XpuAllocations: xpuAllocations,
+			Command:                 command,
+			Cwd:                     context.String("cwd"),
+			Envs:                    envs,
+			Mounts:                  mounts,
+			Resources:               resources,
+			Stdout:                  context.String("stdout"),
+			Stderr:                  context.String("stderr"),
+			Network:                 "sandbox",
+			Ports:                   context.StringSlice("port"),
+			XpuAllocations:          xpuAllocations,
+			WritableLayerLimitBytes: writableLayerLimitBytes,
 		})
 		if err != nil {
 			return err
@@ -167,6 +176,14 @@ var StartCmd = cli.Command{
 		fmt.Printf("Started sandbox %s\n", resp.ID)
 		return nil
 	},
+}
+
+func storageMBToBytes(storageMB uint64) (uint64, error) {
+	const bytesPerMiB = uint64(1024 * 1024)
+	if storageMB > ^uint64(0)/bytesPerMiB {
+		return 0, fmt.Errorf("storage quota %d MiB overflows bytes", storageMB)
+	}
+	return storageMB * bytesPerMiB, nil
 }
 
 func parseXPUAllocationFlags(flags []string) ([]*runtime.XpuAllocation, error) {

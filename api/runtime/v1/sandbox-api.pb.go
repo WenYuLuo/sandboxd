@@ -224,9 +224,13 @@ type RootfsConfig struct {
 	//	*RootfsConfig_ImageUrl
 	//	*RootfsConfig_S3Config
 	//	*RootfsConfig_Path
-	Source        isRootfsConfig_Source `protobuf_oneof:"source"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Source isRootfsConfig_Source `protobuf_oneof:"source"`
+	// WritableLayerSizeBytes is a compatibility alias used by existing
+	// Function Proxy clients. sandboxd normalizes it to the start request's
+	// writable_layer_limit_bytes field.
+	WritableLayerSizeBytes uint64 `protobuf:"varint,6,opt,name=writable_layer_size_bytes,json=writableLayerSizeBytes,proto3" json:"writable_layer_size_bytes,omitempty"`
+	unknownFields          protoimpl.UnknownFields
+	sizeCache              protoimpl.SizeCache
 }
 
 func (x *RootfsConfig) Reset() {
@@ -305,6 +309,13 @@ func (x *RootfsConfig) GetPath() string {
 		}
 	}
 	return ""
+}
+
+func (x *RootfsConfig) GetWritableLayerSizeBytes() uint64 {
+	if x != nil {
+		return x.WritableLayerSizeBytes
+	}
+	return 0
 }
 
 type isRootfsConfig_Source interface {
@@ -559,8 +570,11 @@ type StartRequest struct {
 	MetricLabels map[string]string `protobuf:"bytes,17,rep,name=metric_labels,json=metricLabels,proto3" json:"metric_labels,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	// XpuAllocations contains concrete accelerator devices assigned to the sandbox.
 	XpuAllocations []*XpuAllocation `protobuf:"bytes,18,rep,name=xpu_allocations,json=xpuAllocations,proto3" json:"xpu_allocations,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// WritableLayerLimitBytes is the hard quota for the writable root filesystem
+	// layer. Zero preserves the node-configured default for older clients.
+	WritableLayerLimitBytes uint64 `protobuf:"varint,19,opt,name=writable_layer_limit_bytes,json=writableLayerLimitBytes,proto3" json:"writable_layer_limit_bytes,omitempty"`
+	unknownFields           protoimpl.UnknownFields
+	sizeCache               protoimpl.SizeCache
 }
 
 func (x *StartRequest) Reset() {
@@ -717,6 +731,13 @@ func (x *StartRequest) GetXpuAllocations() []*XpuAllocation {
 		return x.XpuAllocations
 	}
 	return nil
+}
+
+func (x *StartRequest) GetWritableLayerLimitBytes() uint64 {
+	if x != nil {
+		return x.WritableLayerLimitBytes
+	}
+	return 0
 }
 
 // StartResponse is returned after sandbox start.
@@ -1866,13 +1887,14 @@ const file_api_runtime_v1_sandbox_api_proto_rawDesc = "" +
 	"\x06bucket\x18\x02 \x01(\tR\x06bucket\x12\x16\n" +
 	"\x06object\x18\x03 \x01(\tR\x06object\x12\"\n" +
 	"\raccess_key_id\x18\x04 \x01(\tR\vaccessKeyId\x12*\n" +
-	"\x11access_key_secret\x18\x05 \x01(\tR\x0faccessKeySecret\"\xcd\x01\n" +
+	"\x11access_key_secret\x18\x05 \x01(\tR\x0faccessKeySecret\"\x88\x02\n" +
 	"\fRootfsConfig\x12\x1a\n" +
 	"\breadonly\x18\x01 \x01(\bR\breadonly\x12-\n" +
 	"\x04type\x18\x02 \x01(\x0e2\x19.runtime.v1.RootfsSrcTypeR\x04type\x12\x1d\n" +
 	"\timage_url\x18\x03 \x01(\tH\x00R\bimageUrl\x123\n" +
 	"\ts3_config\x18\x04 \x01(\v2\x14.runtime.v1.S3ConfigH\x00R\bs3Config\x12\x14\n" +
-	"\x04path\x18\x05 \x01(\tH\x00R\x04pathB\b\n" +
+	"\x04path\x18\x05 \x01(\tH\x00R\x04path\x129\n" +
+	"\x19writable_layer_size_bytes\x18\x06 \x01(\x04R\x16writableLayerSizeBytesB\b\n" +
 	"\x06source\"\xca\x01\n" +
 	"\x05Mount\x12\x12\n" +
 	"\x04type\x18\x01 \x01(\tR\x04type\x12\x16\n" +
@@ -1886,7 +1908,7 @@ const file_api_runtime_v1_sandbox_api_proto_rawDesc = "" +
 	"\rXpuAllocation\x12\x12\n" +
 	"\x04type\x18\x01 \x01(\tR\x04type\x12\x1d\n" +
 	"\n" +
-	"device_ids\x18\x02 \x03(\rR\tdeviceIds\"\xd4\a\n" +
+	"device_ids\x18\x02 \x03(\rR\tdeviceIds\"\x91\b\n" +
 	"\fStartRequest\x12\x1d\n" +
 	"\n" +
 	"sandbox_id\x18\x01 \x01(\tR\tsandboxId\x12\x1f\n" +
@@ -1908,7 +1930,8 @@ const file_api_runtime_v1_sandbox_api_proto_rawDesc = "" +
 	"\x05ports\x18\x0f \x03(\tR\x05ports\x12<\n" +
 	"\x06labels\x18\x10 \x03(\v2$.runtime.v1.StartRequest.LabelsEntryR\x06labels\x12O\n" +
 	"\rmetric_labels\x18\x11 \x03(\v2*.runtime.v1.StartRequest.MetricLabelsEntryR\fmetricLabels\x12B\n" +
-	"\x0fxpu_allocations\x18\x12 \x03(\v2\x19.runtime.v1.XpuAllocationR\x0expuAllocations\x1a7\n" +
+	"\x0fxpu_allocations\x18\x12 \x03(\v2\x19.runtime.v1.XpuAllocationR\x0expuAllocations\x12;\n" +
+	"\x1awritable_layer_limit_bytes\x18\x13 \x01(\x04R\x17writableLayerLimitBytes\x1a7\n" +
 	"\tEnvsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\x1a<\n" +

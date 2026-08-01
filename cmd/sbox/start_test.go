@@ -51,3 +51,12 @@ func TestParseXPUAllocationFlagsRejectsMultipleAllocations(t *testing.T) {
 	_, err := parseXPUAllocationFlags([]string{"gpu:0", "npu:0"})
 	require.ErrorContains(t, err, "exactly one")
 }
+
+func TestStorageMBToBytes(t *testing.T) {
+	got, err := storageMBToBytes(10 * 1024)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(10<<30), got)
+
+	_, err = storageMBToBytes(^uint64(0))
+	require.Error(t, err)
+}

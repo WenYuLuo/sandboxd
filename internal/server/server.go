@@ -675,6 +675,11 @@ func NewSandboxService(root, configPath string) (result SandboxService, retErr e
 	}()
 
 	s.loadRuntimeHandlers()
+	if nodeResMod != nil && cfg.RuntimeConfig.FilestoreDir != "" {
+		if _, ok := s.serviceHandler.Get(config.RuntimeNameRunsc); ok {
+			nodeResMod.SetEphemeralStorageProvider(s.volumeMgr)
+		}
+	}
 
 	// Prepare resource modules directly. Each
 	// pool runs its own single maintenance goroutine (demand-driven create +
@@ -855,6 +860,18 @@ func (h *sandboxService) Start(ctx context.Context, request *runtime.StartReques
 		err := fmt.Errorf("rootfs is required")
 		return &runtime.StartResponse{Code: -1, Message: err.Error()}, err
 	}
+	if rootfsLimit := startReq.Rootfs.WritableLayerSizeBytes; rootfsLimit > 0 {
+		if startReq.WritableLayerLimitBytes > 0 && startReq.WritableLayerLimitBytes != rootfsLimit {
+			err := fmt.Errorf(
+				"conflicting writable layer limits: start request has %d bytes, rootfs has %d bytes",
+				startReq.WritableLayerLimitBytes,
+				rootfsLimit,
+			)
+			return &runtime.StartResponse{Code: -1, Message: err.Error()},
+				errord.ToGRPC(errord.ErrInvalidArgument)
+		}
+		startReq.WritableLayerLimitBytes = rootfsLimit
+	}
 	if startReq.Runtime == "" {
 		startReq.Runtime = config.RuntimeNameRunsc
 	}
@@ -899,6 +916,51 @@ func (h *sandboxService) Start(ctx context.Context, request *runtime.StartReques
 				Code:    -1,
 				Message: fmt.Sprintf("unsupported network stack %q", extraConfig.NetworkStack),
 			}, errord.ToGRPC(errord.ErrInvalidArgument)
+		}
+	}
+	if startReq.WritableLayerLimitBytes > 0 {
+		if startReq.Runtime != config.RuntimeNameRunsc {
+			err := fmt.Errorf(
+				"writable layer limits require runtime %q; runtime %q is unsupported",
+				config.RuntimeNameRunsc,
+				startReq.Runtime,
+			)
+			return &runtime.StartResponse{Code: -1, Message: err.Error()},
+				errord.ToGRPC(errord.ErrInvalidArgument)
+		}
+		if h.config.RuntimeConfig.FilestoreDir == "" {
+			err := errors.New("writable layer limits require plugin.runtime.filestore_dir")
+			return &runtime.StartResponse{Code: -1, Message: err.Error()},
+				errord.ToGRPC(errord.ErrFailedPrecondition)
+		}
+		if h.volumeMgr == nil {
+			err := errors.New("writable layer storage manager is unavailable")
+			return &runtime.StartResponse{Code: -1, Message: err.Error()},
+				errord.ToGRPC(errord.ErrFailedPrecondition)
+		}
+		capacity, allocatable, capacityErr := h.volumeMgr.EphemeralStorageCapacity()
+		if capacityErr != nil {
+			err := fmt.Errorf("query writable layer capacity: %w", capacityErr)
+			return &runtime.StartResponse{Code: -1, Message: err.Error()},
+				errord.ToGRPC(errord.ErrFailedPrecondition)
+		}
+		if startReq.WritableLayerLimitBytes > capacity {
+			err := fmt.Errorf(
+				"writable layer limit %d exceeds node capacity %d bytes",
+				startReq.WritableLayerLimitBytes,
+				capacity,
+			)
+			return &runtime.StartResponse{Code: -1, Message: err.Error()},
+				errord.ToGRPC(errord.ErrInvalidArgument)
+		}
+		if startReq.WritableLayerLimitBytes > allocatable {
+			err := fmt.Errorf(
+				"writable layer limit %d exceeds node allocatable storage %d bytes",
+				startReq.WritableLayerLimitBytes,
+				allocatable,
+			)
+			return &runtime.StartResponse{Code: -1, Message: err.Error()},
+				errord.ToGRPC(errord.ErrResourceExhausted)
 		}
 	}
 
@@ -1041,20 +1103,21 @@ func (h *sandboxService) Start(ctx context.Context, request *runtime.StartReques
 		sandboxResources = nil
 	}
 	runtimeConfig := svc.StartConfig{
-		ID:            sandboxID,
-		Command:       startReq.Command,
-		Rootfs:        preparedFilesystem.RootfsPath(),
-		Resources:     sandboxResources,
-		Mounts:        preparedFilesystem.Mounts(),
-		Envs:          env,
-		Stdout:        startReq.Stdout,
-		Stderr:        startReq.Stderr,
-		Cwd:           startReq.Cwd,
-		CgroupPath:    preparedResources.Resources[config.ResourceNameCgroup],
-		Annotations:   annotations,
-		Network:       preparedResources.network,
-		DisableCgroup: h.config.DisableCgroup,
-		SpecUpdates:   specUpdates,
+		ID:                      sandboxID,
+		Command:                 startReq.Command,
+		Rootfs:                  preparedFilesystem.RootfsPath(),
+		Resources:               sandboxResources,
+		Mounts:                  preparedFilesystem.Mounts(),
+		Envs:                    env,
+		Stdout:                  startReq.Stdout,
+		Stderr:                  startReq.Stderr,
+		Cwd:                     startReq.Cwd,
+		CgroupPath:              preparedResources.Resources[config.ResourceNameCgroup],
+		Annotations:             annotations,
+		Network:                 preparedResources.network,
+		DisableCgroup:           h.config.DisableCgroup,
+		SpecUpdates:             specUpdates,
+		WritableLayerLimitBytes: startReq.WritableLayerLimitBytes,
 	}
 	if err := h.startSandboxRuntime(ctx, startReq.Runtime, runtimeConfig); err != nil {
 		return &runtime.StartResponse{
