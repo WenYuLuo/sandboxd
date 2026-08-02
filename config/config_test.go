@@ -14,7 +14,11 @@
 
 package config
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/pelletier/go-toml"
+)
 
 func TestNormalizeCPULimitMode(t *testing.T) {
 	for _, test := range []struct {
@@ -47,5 +51,21 @@ func TestNormalizeCPULimitMode(t *testing.T) {
 func TestDefaultConfigUsesCPUQuota(t *testing.T) {
 	if got := DefaultConfig().CPULimitMode; got != CPULimitModeQuota {
 		t.Fatalf("DefaultConfig cpu limit mode = %q, want %q", got, CPULimitModeQuota)
+	}
+}
+
+func TestDefaultConfigDisablesLocalDNAT(t *testing.T) {
+	if DefaultConfig().EnableLocalDNAT {
+		t.Fatal("DefaultConfig local DNAT is enabled, want disabled")
+	}
+}
+
+func TestNetworkConfigEnablesLocalDNAT(t *testing.T) {
+	var cfg Config
+	if err := toml.Unmarshal([]byte("[plugin.network]\nenable_local_dnat = true\n"), &cfg); err != nil {
+		t.Fatalf("decode local DNAT config: %v", err)
+	}
+	if !cfg.EnableLocalDNAT {
+		t.Fatal("configured local DNAT is disabled, want enabled")
 	}
 }

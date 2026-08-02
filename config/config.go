@@ -162,6 +162,11 @@ type NetworkConfig struct {
 	// NatBackend selects the registered NAT implementation used for SNAT/DNAT
 	// rules. Empty defaults to "iptables", the only backend in v0.1.0.
 	NatBackend string `toml:"nat_backend" json:"natBackend"`
+
+	// EnableLocalDNAT forwards connections made to local addresses in
+	// sandboxd's network namespace. It is intended for standalone deployments
+	// whose frontend shares that namespace and is disabled by default.
+	EnableLocalDNAT bool `toml:"enable_local_dnat" json:"enableLocalDNAT"`
 }
 
 // DefaultConfig returns the programmatic default sandboxd configuration.

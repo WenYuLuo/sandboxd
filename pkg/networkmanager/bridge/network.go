@@ -26,10 +26,22 @@ import (
 
 type BridgeNetworkManager struct{}
 
+type iptablesClient interface {
+	Append(table, chain string, rulespec ...string) error
+	AppendUnique(table, chain string, rulespec ...string) error
+	Delete(table, chain string, rulespec ...string) error
+	DeleteIfExists(table, chain string, rulespec ...string) error
+	Exists(table, chain string, rulespec ...string) (bool, error)
+}
+
+var newIPTablesClient = func() (iptablesClient, error) {
+	return iptables.New()
+}
+
 // SetupSNATRules implements networkmanager.NetworkManager.
 func (BridgeNetworkManager) SetupSNATRules(ipRange string) error {
 	// add follow iptable rule: iptables -t nat -A POSTROUTING -s 172.17.0.0/16 -j MASQUERADE
-	ipt, err := iptables.New()
+	ipt, err := newIPTablesClient()
 	if err != nil {
 		return err
 	}
@@ -47,7 +59,7 @@ func (BridgeNetworkManager) SetupSNATRules(ipRange string) error {
 // CleanupSNATRules implements networkmanager.NetworkManager.
 func (BridgeNetworkManager) CleanupSNATRules(ipRange string) error {
 	// clean iptable rule if exists.
-	ipt, err := iptables.New()
+	ipt, err := newIPTablesClient()
 	if err != nil {
 		return err
 	}
@@ -74,7 +86,7 @@ func (BridgeNetworkManager) CleanupNetworkRulesForActivating(ip net.IP) error {
 
 // SetupDNATRule implements networkmanager.NetworkManager.
 func (BridgeNetworkManager) SetupDNATRule(protocol string, dstPort uint16, targetIP string, targetPort uint16) error {
-	ipt, err := iptables.New()
+	ipt, err := newIPTablesClient()
 	if err != nil {
 		return err
 	}
@@ -83,24 +95,62 @@ func (BridgeNetworkManager) SetupDNATRule(protocol string, dstPort uint16, targe
 	targetPortStr := strconv.FormatUint(uint64(targetPort), 10)
 	toDest := fmt.Sprintf("%s:%s", targetIP, targetPortStr)
 
-	// iptables -t nat -A PREROUTING -p <proto> --dport <dstPort> -j DNAT --to-destination <targetIP>:<targetPort>
-	if err := ipt.AppendUnique("nat", "PREROUTING", "-p", protocol, "--dport", dstPortStr, "-j", "DNAT", "--to-destination", toDest); err != nil {
+	preroutingRule := []string{
+		"-p", protocol,
+		"--dport", dstPortStr,
+		"-j", "DNAT",
+		"--to-destination", toDest,
+	}
+	forwardRule := []string{
+		"-p", protocol,
+		"-d", targetIP,
+		"--dport", targetPortStr,
+		"-j", "ACCEPT",
+	}
+
+	// PREROUTING handles traffic entering the node network namespace.
+	if err := ipt.AppendUnique("nat", "PREROUTING", preroutingRule...); err != nil {
 		return fmt.Errorf("failed to add PREROUTING DNAT rule: %v", err)
 	}
 
-	// iptables -A FORWARD -p <proto> -d <targetIP> --dport <targetPort> -j ACCEPT
-	if err := ipt.AppendUnique("filter", "FORWARD", "-p", protocol, "-d", targetIP, "--dport", targetPortStr, "-j", "ACCEPT"); err != nil {
-		// rollback PREROUTING rule
-		ipt.Delete("nat", "PREROUTING", "-p", protocol, "--dport", dstPortStr, "-j", "DNAT", "--to-destination", toDest)
+	if err := ipt.AppendUnique("filter", "FORWARD", forwardRule...); err != nil {
+		_ = ipt.Delete("nat", "PREROUTING", preroutingRule...)
 		return fmt.Errorf("failed to add FORWARD rule: %v", err)
 	}
 
 	return nil
 }
 
+// SetupLocalDNATRule forwards callers that share sandboxd's network namespace.
+func (BridgeNetworkManager) SetupLocalDNATRule(
+	protocol string,
+	dstPort uint16,
+	targetIP string,
+	targetPort uint16,
+) error {
+	ipt, err := newIPTablesClient()
+	if err != nil {
+		return err
+	}
+	dstPortStr := strconv.FormatUint(uint64(dstPort), 10)
+	toDest := fmt.Sprintf("%s:%d", targetIP, targetPort)
+	outputRule := []string{
+		"-p", protocol,
+		"-m", "addrtype",
+		"--dst-type", "LOCAL",
+		"--dport", dstPortStr,
+		"-j", "DNAT",
+		"--to-destination", toDest,
+	}
+	if err := ipt.AppendUnique("nat", "OUTPUT", outputRule...); err != nil {
+		return fmt.Errorf("failed to add OUTPUT DNAT rule: %v", err)
+	}
+	return nil
+}
+
 // CleanupDNATRule implements networkmanager.NetworkManager.
 func (BridgeNetworkManager) CleanupDNATRule(protocol string, dstPort uint16, targetIP string, targetPort uint16) error {
-	ipt, err := iptables.New()
+	ipt, err := newIPTablesClient()
 	if err != nil {
 		return err
 	}
@@ -109,18 +159,59 @@ func (BridgeNetworkManager) CleanupDNATRule(protocol string, dstPort uint16, tar
 	targetPortStr := strconv.FormatUint(uint64(targetPort), 10)
 	toDest := fmt.Sprintf("%s:%s", targetIP, targetPortStr)
 
-	// best-effort: remove both rules, report first error
+	preroutingRule := []string{
+		"-p", protocol,
+		"--dport", dstPortStr,
+		"-j", "DNAT",
+		"--to-destination", toDest,
+	}
+	forwardRule := []string{
+		"-p", protocol,
+		"-d", targetIP,
+		"--dport", targetPortStr,
+		"-j", "ACCEPT",
+	}
+
+	// Best-effort: remove both ingress rules and report the first error.
 	var firstErr error
 
-	if err := ipt.DeleteIfExists("nat", "PREROUTING", "-p", protocol, "--dport", dstPortStr, "-j", "DNAT", "--to-destination", toDest); err != nil {
+	if err := ipt.DeleteIfExists("nat", "PREROUTING", preroutingRule...); err != nil {
 		firstErr = fmt.Errorf("failed to delete PREROUTING DNAT rule: %v", err)
 	}
 
-	if err := ipt.DeleteIfExists("filter", "FORWARD", "-p", protocol, "-d", targetIP, "--dport", targetPortStr, "-j", "ACCEPT"); err != nil && firstErr == nil {
+	if err := ipt.DeleteIfExists("filter", "FORWARD", forwardRule...); err != nil && firstErr == nil {
 		firstErr = fmt.Errorf("failed to delete FORWARD rule: %v", err)
 	}
 
 	return firstErr
+}
+
+// CleanupLocalDNATRule removes a local-caller rule whether or not the feature
+// remains enabled, so configuration changes do not strand compatible rules.
+func (BridgeNetworkManager) CleanupLocalDNATRule(
+	protocol string,
+	dstPort uint16,
+	targetIP string,
+	targetPort uint16,
+) error {
+	ipt, err := newIPTablesClient()
+	if err != nil {
+		return err
+	}
+	dstPortStr := strconv.FormatUint(uint64(dstPort), 10)
+	toDest := fmt.Sprintf("%s:%d", targetIP, targetPort)
+	outputRule := []string{
+		"-p", protocol,
+		"-m", "addrtype",
+		"--dst-type", "LOCAL",
+		"--dport", dstPortStr,
+		"-j", "DNAT",
+		"--to-destination", toDest,
+	}
+	if err := ipt.DeleteIfExists("nat", "OUTPUT", outputRule...); err != nil {
+		return fmt.Errorf("failed to delete OUTPUT DNAT rule: %v", err)
+	}
+	return nil
 }
 
 func init() {

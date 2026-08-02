@@ -727,7 +727,10 @@ func NewSandboxService(root, configPath string) (result SandboxService, retErr e
 			}
 		}()
 	}
-	s.networkMgr = newNetworkManager(interfaceMgr, cfg.NatBackend)
+	s.networkMgr = newNetworkManager(interfaceMgr, cfg.NatBackend, cfg.EnableLocalDNAT)
+	if cfg.EnableLocalDNAT {
+		logrus.Info("local DNAT forwarding enabled for callers sharing sandboxd's network namespace")
+	}
 	logrus.Debugf("resource modules init success with config: %v", cfg.PluginConfig.ResourceConfig)
 
 	// create root dir if not exist

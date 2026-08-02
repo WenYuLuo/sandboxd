@@ -18,6 +18,9 @@ storeDir = "/var/lib/sandboxd/store"
 [plugin.network]
 ip_range = "10.88.0.1/24"
 nat_backend = "iptables"
+# Enable only when a trusted frontend shares sandboxd's network namespace and
+# must reach forwarded sandbox ports through a local address.
+enable_local_dnat = false
 
 [plugin.resource]
 # EXPERIMENTAL/DEBUG ONLY. Set true when /sys/fs/cgroup is read-only.

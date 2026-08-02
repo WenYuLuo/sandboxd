@@ -32,6 +32,14 @@ type NetworkManager interface {
 	CleanupDNATRule(protocol string, dstPort uint16, targetIP string, targetPort uint16) error
 }
 
+// LocalDNATManager optionally forwards callers that share sandboxd's network
+// namespace. Deployments must enable this behavior explicitly.
+type LocalDNATManager interface {
+	SetupLocalDNATRule(protocol string, dstPort uint16, targetIP string, targetPort uint16) error
+
+	CleanupLocalDNATRule(protocol string, dstPort uint16, targetIP string, targetPort uint16) error
+}
+
 var NetworkManagers = map[string]NetworkManager{}
 
 func Register(name string, manager NetworkManager) {

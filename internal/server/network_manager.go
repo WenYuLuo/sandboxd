@@ -15,6 +15,7 @@
 package server
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -34,8 +35,9 @@ type dnatRule struct {
 }
 
 type networkManager struct {
-	iface      *networkmanager.InterfaceManager
-	natBackend string
+	iface           *networkmanager.InterfaceManager
+	natBackend      string
+	enableLocalDNAT bool
 
 	dnatMu    sync.Mutex
 	dnatRules map[string][]*dnatRule
@@ -56,11 +58,16 @@ func resolveNATBackend(name string) (string, error) {
 	return name, nil
 }
 
-func newNetworkManager(iface *networkmanager.InterfaceManager, natBackend string) *networkManager {
+func newNetworkManager(
+	iface *networkmanager.InterfaceManager,
+	natBackend string,
+	enableLocalDNAT bool,
+) *networkManager {
 	return &networkManager{
-		iface:      iface,
-		natBackend: natBackend,
-		dnatRules:  make(map[string][]*dnatRule),
+		iface:           iface,
+		natBackend:      natBackend,
+		enableLocalDNAT: enableLocalDNAT,
+		dnatRules:       make(map[string][]*dnatRule),
 	}
 }
 
@@ -104,6 +111,14 @@ func (m *networkManager) setupDnatRules(sandboxID string, ports []string, target
 	if !ok {
 		return fmt.Errorf("network manager not found for type: %s", m.natBackend)
 	}
+	var localNAT networkmanager.LocalDNATManager
+	if m.enableLocalDNAT {
+		var supported bool
+		localNAT, supported = nat.(networkmanager.LocalDNATManager)
+		if !supported {
+			return fmt.Errorf("network manager %s does not support local DNAT", m.natBackend)
+		}
+	}
 
 	rules := make([]*dnatRule, 0, len(ports))
 	for _, port := range ports {
@@ -115,13 +130,35 @@ func (m *networkManager) setupDnatRules(sandboxID string, ports []string, target
 		if err := nat.SetupDNATRule(rule.Protocol, rule.DstPort, rule.TargetIP, rule.TargetPort); err != nil {
 			for i := len(rules) - 1; i >= 0; i-- {
 				prev := rules[i]
-				if cleanupErr := nat.CleanupDNATRule(prev.Protocol, prev.DstPort, prev.TargetIP, prev.TargetPort); cleanupErr != nil {
+				if cleanupErr := cleanupDnatRule(nat, prev); cleanupErr != nil {
 					logrus.Warnf("rollback DNAT rule for %s:%d->%s:%d failed: %v",
 						prev.Protocol, prev.DstPort, prev.TargetIP, prev.TargetPort, cleanupErr)
 				}
 			}
 			return fmt.Errorf("failed to add DNAT rule for %s:%d->%s:%d: %v",
 				rule.Protocol, rule.DstPort, rule.TargetIP, rule.TargetPort, err)
+		}
+		if localNAT != nil {
+			if err := localNAT.SetupLocalDNATRule(
+				rule.Protocol,
+				rule.DstPort,
+				rule.TargetIP,
+				rule.TargetPort,
+			); err != nil {
+				if cleanupErr := cleanupDnatRule(nat, rule); cleanupErr != nil {
+					logrus.Warnf("rollback DNAT rule for %s:%d->%s:%d failed: %v",
+						rule.Protocol, rule.DstPort, rule.TargetIP, rule.TargetPort, cleanupErr)
+				}
+				for i := len(rules) - 1; i >= 0; i-- {
+					prev := rules[i]
+					if cleanupErr := cleanupDnatRule(nat, prev); cleanupErr != nil {
+						logrus.Warnf("rollback DNAT rule for %s:%d->%s:%d failed: %v",
+							prev.Protocol, prev.DstPort, prev.TargetIP, prev.TargetPort, cleanupErr)
+					}
+				}
+				return fmt.Errorf("failed to add local DNAT rule for %s:%d->%s:%d: %v",
+					rule.Protocol, rule.DstPort, rule.TargetIP, rule.TargetPort, err)
+			}
 		}
 
 		logrus.Infof("Added DNAT rule: %s:%d -> %s:%d for sandbox %s",
@@ -134,6 +171,29 @@ func (m *networkManager) setupDnatRules(sandboxID string, ports []string, target
 	m.dnatRules[sandboxID] = rules
 	m.dnatMu.Unlock()
 	return nil
+}
+
+func cleanupDnatRule(nat networkmanager.NetworkManager, rule *dnatRule) error {
+	var cleanupErrors []error
+	if localNAT, ok := nat.(networkmanager.LocalDNATManager); ok {
+		if err := localNAT.CleanupLocalDNATRule(
+			rule.Protocol,
+			rule.DstPort,
+			rule.TargetIP,
+			rule.TargetPort,
+		); err != nil {
+			cleanupErrors = append(cleanupErrors, fmt.Errorf("cleanup local DNAT: %w", err))
+		}
+	}
+	if err := nat.CleanupDNATRule(
+		rule.Protocol,
+		rule.DstPort,
+		rule.TargetIP,
+		rule.TargetPort,
+	); err != nil {
+		cleanupErrors = append(cleanupErrors, fmt.Errorf("cleanup DNAT: %w", err))
+	}
+	return errors.Join(cleanupErrors...)
 }
 
 func parseDnatRule(sandboxID, port, targetIP string) (*dnatRule, error) {
@@ -178,7 +238,7 @@ func (m *networkManager) cleanupDnatRules(sandboxID string) {
 				m.natBackend, rule.Protocol, rule.DstPort, rule.TargetIP, rule.TargetPort)
 			continue
 		}
-		if err := nat.CleanupDNATRule(rule.Protocol, rule.DstPort, rule.TargetIP, rule.TargetPort); err != nil {
+		if err := cleanupDnatRule(nat, rule); err != nil {
 			logrus.Warnf("failed to delete DNAT rule for %s:%d->%s:%d: %v",
 				rule.Protocol, rule.DstPort, rule.TargetIP, rule.TargetPort, err)
 			continue

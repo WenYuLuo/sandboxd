@@ -70,7 +70,7 @@ func newTestService(t *testing.T, handlers map[string]svc.Handler) *sandboxServi
 		store:                             store.NewMockStore(),
 		UnimplementedSandboxServiceServer: runtime.UnimplementedSandboxServiceServer{},
 		fsMgr:                             newFSManager(nil),
-		networkMgr:                        newNetworkManager(nil, ""),
+		networkMgr:                        newNetworkManager(nil, "", false),
 	}
 	s.ready.Store(true)
 	s.recoveryReady.Store(true)
@@ -402,10 +402,13 @@ func TestStart_And_Delete(t *testing.T) {
 
 // fakeNetworkManager records DNAT calls for verification without touching iptables.
 type fakeNetworkManager struct {
-	mu       sync.Mutex
-	added    []dnatCall
-	removed  []dnatCall
-	failNext bool
+	mu           sync.Mutex
+	added        []dnatCall
+	localAdded   []dnatCall
+	removed      []dnatCall
+	localRemoved []dnatCall
+	failNext     bool
+	failLocal    bool
 }
 
 type dnatCall struct {
@@ -439,6 +442,42 @@ func (f *fakeNetworkManager) CleanupDNATRule(protocol string, dstPort uint16, ta
 		return fmt.Errorf("injected error")
 	}
 	f.removed = append(f.removed, dnatCall{protocol, dstPort, targetIP, targetPort})
+	return nil
+}
+
+func (f *fakeNetworkManager) SetupLocalDNATRule(
+	protocol string,
+	dstPort uint16,
+	targetIP string,
+	targetPort uint16,
+) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.failLocal {
+		f.failLocal = false
+		return fmt.Errorf("injected local DNAT error")
+	}
+	if f.failNext {
+		f.failNext = false
+		return fmt.Errorf("injected error")
+	}
+	f.localAdded = append(f.localAdded, dnatCall{protocol, dstPort, targetIP, targetPort})
+	return nil
+}
+
+func (f *fakeNetworkManager) CleanupLocalDNATRule(
+	protocol string,
+	dstPort uint16,
+	targetIP string,
+	targetPort uint16,
+) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.failNext {
+		f.failNext = false
+		return fmt.Errorf("injected error")
+	}
+	f.localRemoved = append(f.localRemoved, dnatCall{protocol, dstPort, targetIP, targetPort})
 	return nil
 }
 
@@ -494,7 +533,7 @@ func newDnatTestService(t *testing.T, fake *fakeNetworkManager) *sandboxService 
 		"runsc": svc.NewFakeRuntimeHandler(),
 	})
 	s.config.NatBackend = testNetworkType
-	s.networkMgr = newNetworkManager(nil, testNetworkType)
+	s.networkMgr = newNetworkManager(nil, testNetworkType, false)
 	return s
 }
 
@@ -507,6 +546,7 @@ func TestSetupDnatRules_Basic(t *testing.T) {
 
 	// Verify NetworkManager was called correctly
 	assert.Len(t, fake.added, 2)
+	assert.Empty(t, fake.localAdded)
 	assert.Equal(t, dnatCall{"tcp", 8080, "10.0.0.2", 80}, fake.added[0])
 	assert.Equal(t, dnatCall{"udp", 5353, "10.0.0.2", 53}, fake.added[1])
 
@@ -517,6 +557,29 @@ func TestSetupDnatRules_Basic(t *testing.T) {
 	assert.Equal(t, uint16(8080), rules[0].DstPort)
 	assert.Equal(t, "10.0.0.2", rules[0].TargetIP)
 	assert.Equal(t, uint16(80), rules[0].TargetPort)
+}
+
+func TestSetupDnatRules_LocalDNATEnabled(t *testing.T) {
+	fake := &fakeNetworkManager{}
+	s := newDnatTestService(t, fake)
+	s.networkMgr = newNetworkManager(nil, testNetworkType, true)
+
+	err := s.networkMgr.setupDnatRules("ctr-1", []string{"tcp:8080:80"}, "10.0.0.2")
+	assert.NoError(t, err)
+	assert.Equal(t, []dnatCall{{"tcp", 8080, "10.0.0.2", 80}}, fake.added)
+	assert.Equal(t, []dnatCall{{"tcp", 8080, "10.0.0.2", 80}}, fake.localAdded)
+}
+
+func TestSetupDnatRules_LocalDNATFailureRollsBack(t *testing.T) {
+	fake := &fakeNetworkManager{failLocal: true}
+	s := newDnatTestService(t, fake)
+	s.networkMgr = newNetworkManager(nil, testNetworkType, true)
+
+	err := s.networkMgr.setupDnatRules("ctr-1", []string{"tcp:8080:80"}, "10.0.0.2")
+	assert.ErrorContains(t, err, "failed to add local DNAT rule")
+	assert.Len(t, fake.added, 1)
+	assert.Len(t, fake.removed, 1)
+	assert.Empty(t, s.networkMgr.rulesFor("ctr-1"))
 }
 
 func TestSetupDnatRules_EmptyPorts(t *testing.T) {
@@ -562,7 +625,7 @@ func TestSetupDnatRules_NoNetworkManager(t *testing.T) {
 		"runsc": svc.NewFakeRuntimeHandler(),
 	})
 	s.config.NatBackend = "nonexistent-type"
-	s.networkMgr = newNetworkManager(nil, "nonexistent-type")
+	s.networkMgr = newNetworkManager(nil, "nonexistent-type", false)
 
 	err := s.networkMgr.setupDnatRules("ctr-1", []string{"tcp:8080:80"}, "10.0.0.2")
 	assert.Error(t, err)
@@ -581,6 +644,7 @@ func TestCleanupDnatRules_Basic(t *testing.T) {
 	s.networkMgr.cleanupDnatRules("ctr-1")
 
 	assert.Len(t, fake.removed, 2)
+	assert.Len(t, fake.localRemoved, 2)
 	assert.Equal(t, dnatCall{"tcp", 8080, "10.0.0.2", 80}, fake.removed[0])
 	assert.Equal(t, dnatCall{"udp", 5353, "10.0.0.2", 53}, fake.removed[1])
 
