@@ -15,8 +15,11 @@
 package runtime
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 
 	runtime "github.com/inclusionAI/sandboxd/api/runtime/v1"
@@ -147,5 +150,66 @@ func TestGenerateOciRejectsEscapingSandboxID(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("GenerateOci accepted a sandbox ID that escapes the bundle root")
+	}
+}
+
+func TestGenerateOciUsesFileBackedRootfsImageOverlay(t *testing.T) {
+	bundleRoot := t.TempDir()
+	rootfsImage := filepath.Join(t.TempDir(), "rootfs.img")
+	if err := os.WriteFile(rootfsImage, []byte("erofs-placeholder"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	loader, err := NewBundleLoader("", bundleRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loader.baseSpec.Root.Readonly = false
+	filestoreDir := filepath.Join(t.TempDir(), "filestore")
+	_, spec, err := loader.GenerateOci(OciLoadOptions{
+		SandboxID:  "sandbox-storage",
+		CgroupPath: "/sandbox/storage",
+		Config: StartConfig{
+			Rootfs:    rootfsImage,
+			Resources: &runtime.LinuxSandboxResources{},
+		},
+		UseGVisorRootfsImageAnnotations: true,
+		RootfsOverlayDir:                filestoreDir,
+		RootfsOverlayTmpfsSize:          "10G",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := spec.Annotations[gvisorRootfsAnnotationPrefix+"overlay"]; got != "dir="+filestoreDir {
+		t.Fatalf("rootfs overlay annotation = %q", got)
+	}
+	if got := spec.Annotations[gvisorRootfsAnnotationPrefix+"options"]; got != "size=10G" {
+		t.Fatalf("rootfs options annotation = %q", got)
+	}
+	if spec.Root.Path != "rootfs" {
+		t.Fatalf("root path = %q, want placeholder rootfs", spec.Root.Path)
+	}
+}
+
+func TestGenerateOciRejectsMemoryBackedRootfsImageOverlay(t *testing.T) {
+	rootfsImage := filepath.Join(t.TempDir(), "rootfs.img")
+	if err := os.WriteFile(rootfsImage, []byte("erofs-placeholder"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	loader, err := NewBundleLoader("", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	loader.baseSpec.Root.Readonly = false
+	_, _, err = loader.GenerateOci(OciLoadOptions{
+		SandboxID:  "sandbox-storage",
+		CgroupPath: "/sandbox/storage",
+		Config: StartConfig{
+			Rootfs:    rootfsImage,
+			Resources: &runtime.LinuxSandboxResources{},
+		},
+		UseGVisorRootfsImageAnnotations: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "requires a filestore directory") {
+		t.Fatalf("GenerateOci() error = %v, want missing filestore error", err)
 	}
 }

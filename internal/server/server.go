@@ -543,6 +543,9 @@ func NewSandboxService(root, configPath string) (result SandboxService, retErr e
 	} else if err := toml.NewDecoder(bytes.NewReader(configBytes)).Decode(&cfg); err != nil {
 		return nil, err
 	}
+	if err := validateRuntimeFilestore(cfg.RuntimeConfig); err != nil {
+		return nil, err
+	}
 
 	natBackend, err := resolveNATBackend(cfg.NatBackend)
 	if err != nil {
@@ -730,6 +733,13 @@ func NewSandboxService(root, configPath string) (result SandboxService, retErr e
 	}()
 
 	return s, nil
+}
+
+func validateRuntimeFilestore(runtimeConfig config.RuntimeConfig) error {
+	if _, runscEnabled := runtimeConfig.RuntimeBinary[config.RuntimeNameRunsc]; runscEnabled && strings.TrimSpace(runtimeConfig.FilestoreDir) == "" {
+		return errors.New("runsc requires plugin.runtime.filestore_dir")
+	}
+	return nil
 }
 
 func (h *sandboxService) Delete(ctx context.Context, request *runtime.DeleteRequest) (response *runtime.DeleteResponse, err error) {

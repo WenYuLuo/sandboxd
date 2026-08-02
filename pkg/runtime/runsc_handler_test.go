@@ -26,7 +26,9 @@ import (
 func TestNewRunscHandlerUsesSharedLogFile(t *testing.T) {
 	baseDir := t.TempDir()
 	rootDir := filepath.Join(baseDir, "sandboxd", "root")
-	handler, err := NewRunscHandler(config.Config{RootDir: rootDir}, "/usr/local/bin/runsc", nil)
+	cfg := config.Config{RootDir: rootDir}
+	cfg.RuntimeConfig.FilestoreDir = filepath.Join(baseDir, "filestore")
+	handler, err := NewRunscHandler(cfg, "/usr/local/bin/runsc", nil)
 	assert.NoError(t, err)
 
 	client, ok := handler.runsc.(*runscapi.Client)
@@ -40,9 +42,16 @@ func TestNewRunscHandlerPropagatesIgnoreCgroups(t *testing.T) {
 	rootDir := filepath.Join(t.TempDir(), "sandboxd", "root")
 	cfg := config.Config{RootDir: rootDir}
 	cfg.DisableCgroup = true
+	cfg.RuntimeConfig.FilestoreDir = filepath.Join(t.TempDir(), "filestore")
 	handler, err := NewRunscHandler(cfg, "/usr/local/bin/runsc", nil)
 	assert.NoError(t, err)
 
 	client := handler.runsc.(*runscapi.Client)
 	assert.True(t, client.Options.IgnoreCgroups)
+}
+
+func TestNewRunscHandlerRejectsMissingFilestore(t *testing.T) {
+	rootDir := filepath.Join(t.TempDir(), "sandboxd", "root")
+	_, err := NewRunscHandler(config.Config{RootDir: rootDir}, "/usr/local/bin/runsc", nil)
+	assert.ErrorContains(t, err, "plugin.runtime.filestore_dir")
 }

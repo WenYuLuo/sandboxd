@@ -18,6 +18,7 @@ set -Eeuo pipefail
 SANDBOXD_HOME="${SANDBOXD_HOME:-/home/akernel/sandboxd}"
 SANDBOXD_ROOT="${SANDBOXD_ROOT:-${SANDBOXD_HOME}/root}"
 SANDBOXD_STORE="${SANDBOXD_STORE:-${SANDBOXD_HOME}/store}"
+FILESTORE="${E2E_FILESTORE:-${SANDBOXD_HOME}/filestore}"
 CONFIG_DIR="${SANDBOXD_HOME}/config"
 CONFIG_FILE="${SANDBOXD_HOME}/config.toml"
 SOCKET="${SANDBOXD_SOCKET:-/run/sandboxd/sandboxd.sock}"
@@ -250,6 +251,8 @@ pids_max = 64
 
 [plugin.runtime]
 image_lib_dir = "/e2e/images"
+filestore_dir = "${FILESTORE}"
+filestore_dir_size = "1G"
 overlay_tmpfs_size = "64M"
 
 [plugin.runtime.basic_spec]
@@ -541,6 +544,8 @@ run_checks() {
 
     got="$(sbox_cmd exec "${SANDBOX_ID}" /bin/sh -c 'echo writable-ok > /tmp/e2e-write && cat /tmp/e2e-write')"
     assert_eq "${got}" "writable-ok" "writable overlay"
+    grep -F -- "--overlay2=root:dir=${FILESTORE},size=64M" "${LOG_FILE}" >/dev/null || \
+        fail "runsc did not use the configured file-backed root overlay"
 
     got="$(sbox_cmd exec "${SANDBOX_ID}" /bin/cat /mnt/host/input.txt)"
     assert_eq "${got}" "host-mount-ok" "host bind mount read"

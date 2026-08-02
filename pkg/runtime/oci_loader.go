@@ -16,6 +16,7 @@ package runtime
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -37,7 +38,7 @@ const (
 
 	gvisorRootfsAnnotationPrefix = "dev.gvisor.spec.rootfs."
 	gvisorRootfsTypeEROFS        = "erofs"
-	gvisorRootfsOverlayMemory    = "memory"
+	gvisorRootfsOverlayDirPrefix = "dir="
 )
 
 type OciLoader interface {
@@ -55,6 +56,7 @@ type OciLoadOptions struct {
 	OverrideRootPath string
 
 	UseGVisorRootfsImageAnnotations bool
+	RootfsOverlayDir                string
 	RootfsOverlayTmpfsSize          string
 }
 
@@ -154,7 +156,12 @@ func (r *BundleLoader) GenerateOci(options OciLoadOptions) (string, *Spec, error
 	}
 
 	if options.UseGVisorRootfsImageAnnotations && options.OverrideRootPath == "" {
-		if err := applyGVisorRootfsImageAnnotations(ociSpec, bundleDir, options.RootfsOverlayTmpfsSize); err != nil {
+		if err := applyGVisorRootfsImageAnnotations(
+			ociSpec,
+			bundleDir,
+			options.RootfsOverlayDir,
+			options.RootfsOverlayTmpfsSize,
+		); err != nil {
 			return "", ociSpec, err
 		}
 	}
@@ -174,7 +181,12 @@ func (r *BundleLoader) GenerateOci(options OciLoadOptions) (string, *Spec, error
 	return bundleDir, ociSpec, os.WriteFile(ociFile, buf, 0644)
 }
 
-func applyGVisorRootfsImageAnnotations(spec *Spec, bundleDir, overlayTmpfsSize string) error {
+func applyGVisorRootfsImageAnnotations(
+	spec *Spec,
+	bundleDir string,
+	overlayDir string,
+	overlayTmpfsSize string,
+) error {
 	if spec.Root == nil || spec.Root.Path == "" {
 		return nil
 	}
@@ -210,7 +222,10 @@ func applyGVisorRootfsImageAnnotations(spec *Spec, bundleDir, overlayTmpfsSize s
 	spec.Annotations[gvisorRootfsAnnotationPrefix+"source"] = rootfsImage
 	spec.Annotations[gvisorRootfsAnnotationPrefix+"type"] = gvisorRootfsTypeEROFS
 	if !spec.Root.Readonly {
-		spec.Annotations[gvisorRootfsAnnotationPrefix+"overlay"] = gvisorRootfsOverlayMemory
+		if overlayDir == "" {
+			return errors.New("gVisor writable rootfs image requires a filestore directory")
+		}
+		spec.Annotations[gvisorRootfsAnnotationPrefix+"overlay"] = gvisorRootfsOverlayDirPrefix + overlayDir
 		if overlayTmpfsSize != "" {
 			spec.Annotations[gvisorRootfsAnnotationPrefix+"options"] = "size=" + overlayTmpfsSize
 		}

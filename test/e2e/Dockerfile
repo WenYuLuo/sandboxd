@@ -28,7 +28,8 @@ RUN apt-get update && \
         kmod \
         mount \
         netcat-openbsd \
-        procps && \
+        procps \
+        xfsprogs && \
     rm -rf /var/lib/apt/lists/* && \
     if [ -x /usr/sbin/iptables-legacy ]; then \
         update-alternatives --set iptables /usr/sbin/iptables-legacy; \

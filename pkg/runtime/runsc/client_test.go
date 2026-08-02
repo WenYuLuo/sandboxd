@@ -35,6 +35,7 @@ func TestCreateUsesExactDebugLogPath(t *testing.T) {
 	debugLogPath := filepath.Join(tempDir, "logs", "runsc.log")
 	client := NewClientWithOptions(binary, filepath.Join(tempDir, "root"), Options{
 		DebugLogPath: debugLogPath,
+		FilestoreDir: filepath.Join(tempDir, "filestore"),
 	})
 	if err := client.Create(context.Background(), StartArgs{
 		ID:         "sandbox-id",
@@ -57,6 +58,51 @@ func TestCreateUsesExactDebugLogPath(t *testing.T) {
 		}
 	}
 	t.Fatalf("runsc arguments %q do not contain %q", args, want)
+}
+
+func TestCreateUsesFileBackedRootOverlay(t *testing.T) {
+	tempDir := t.TempDir()
+	argsFile := filepath.Join(tempDir, "args")
+	binary := filepath.Join(tempDir, "runsc")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$RUNSC_TEST_ARGS\"\n"
+	if err := os.WriteFile(binary, []byte(script), 0755); err != nil {
+		t.Fatalf("write fake runsc: %v", err)
+	}
+	t.Setenv("RUNSC_TEST_ARGS", argsFile)
+
+	filestoreDir := filepath.Join(tempDir, "filestore")
+	client := NewClientWithOptions(binary, filepath.Join(tempDir, "root"), Options{
+		FilestoreDir:     filestoreDir,
+		OverlayTmpfsSize: "10G",
+	})
+	if err := client.Create(context.Background(), StartArgs{
+		ID:         "sandbox-storage",
+		BundleDir:  filepath.Join(tempDir, "bundle"),
+		UserStdout: filepath.Join(tempDir, "stdout"),
+		UserStderr: filepath.Join(tempDir, "stderr"),
+	}); err != nil {
+		t.Fatalf("Create() failed: %v", err)
+	}
+
+	data, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("read fake runsc arguments: %v", err)
+	}
+	want := "--overlay2=root:dir=" + filestoreDir + ",size=10G\n"
+	if !strings.Contains(string(data), want) {
+		t.Fatalf("runsc arguments %q do not contain %q", string(data), want)
+	}
+}
+
+func TestCreateRejectsMissingFilestore(t *testing.T) {
+	client := NewClientWithOptions("/usr/local/bin/runsc", t.TempDir(), Options{})
+	err := client.Create(context.Background(), StartArgs{
+		ID:        "sandbox-storage",
+		BundleDir: t.TempDir(),
+	})
+	if err == nil || !strings.Contains(err.Error(), "filestore directory is empty") {
+		t.Fatalf("Create() error = %v, want missing filestore error", err)
+	}
 }
 
 func TestGlobalArgsIgnoreCgroups(t *testing.T) {

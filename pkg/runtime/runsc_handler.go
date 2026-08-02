@@ -41,6 +41,7 @@ type RunscHandler struct {
 	ociLoader OciLoader
 
 	rootfsOverlayTmpfsSize string
+	filestoreDir           string
 }
 
 type runscClient interface {
@@ -52,6 +53,9 @@ type runscClient interface {
 }
 
 func NewRunscHandler(cfg config.Config, bin string, loader OciLoader) (*RunscHandler, error) {
+	if cfg.RuntimeConfig.FilestoreDir == "" {
+		return nil, fmt.Errorf("runsc requires plugin.runtime.filestore_dir")
+	}
 	root := cfg.RootDir
 	runscRoot := filepath.Join(root, config.RuntimeNameRunsc)
 	if err := os.MkdirAll(runscRoot, 0711); err != nil {
@@ -72,6 +76,7 @@ func NewRunscHandler(cfg config.Config, bin string, loader OciLoader) (*RunscHan
 		}),
 		ociLoader:              loader,
 		rootfsOverlayTmpfsSize: cfg.RuntimeConfig.OverlayTmpfsSize,
+		filestoreDir:           cfg.RuntimeConfig.FilestoreDir,
 	}, nil
 }
 
@@ -86,6 +91,7 @@ func (r *RunscHandler) Start(ctx context.Context, config StartConfig) error {
 		Config:                          config,
 		CgroupPath:                      config.CgroupPath,
 		UseGVisorRootfsImageAnnotations: true,
+		RootfsOverlayDir:                r.filestoreDir,
 		RootfsOverlayTmpfsSize:          r.rootfsOverlayTmpfsSize,
 	})
 	if err != nil {

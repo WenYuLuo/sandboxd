@@ -418,6 +418,19 @@ func TestResolveNATBackend(t *testing.T) {
 	}
 }
 
+func TestValidateRuntimeFilestore(t *testing.T) {
+	assert.ErrorContains(t, validateRuntimeFilestore(config.RuntimeConfig{
+		RuntimeBinary: map[string]string{config.RuntimeNameRunsc: "/usr/local/bin/runsc"},
+	}), "plugin.runtime.filestore_dir")
+	assert.NoError(t, validateRuntimeFilestore(config.RuntimeConfig{
+		RuntimeBinary: map[string]string{config.RuntimeNameRunsc: "/usr/local/bin/runsc"},
+		FilestoreDir:  "/var/lib/sandboxd/filestore",
+	}))
+	assert.NoError(t, validateRuntimeFilestore(config.RuntimeConfig{
+		RuntimeBinary: map[string]string{config.RuntimeNameKata: "/usr/local/bin/containerd-shim-kata-v2"},
+	}))
+}
+
 // newDnatTestService creates a sandboxService with a fake NetworkManager registered.
 func newDnatTestService(t *testing.T, fake *fakeNetworkManager) *sandboxService {
 	t.Helper()

@@ -84,8 +84,9 @@ type RuntimeConfig struct {
 	// and the mount point does not already exist as an XFS filesystem.
 	FilestoreDirSize string `toml:"filestore_dir_size" json:"filestoreDirSize"`
 
-	// OverlayTmpfsSize specifies the size limit for the overlay tmpfs upper
-	// layer (e.g. "256M", "1G"). When empty, no size limit is applied.
+	// OverlayTmpfsSize specifies the size limit for the gVisor writable overlay
+	// (e.g. "256M", "1G"). The name is retained for configuration compatibility.
+	// When empty, no size limit is applied.
 	OverlayTmpfsSize string `toml:"overlay_tmpfs_size" json:"overlayTmpfsSize"`
 }
 

@@ -83,6 +83,9 @@ func (c *Client) Create(ctx context.Context, args StartArgs) error {
 	if args.BundleDir == "" {
 		return fmt.Errorf("bundle dir is empty for %s", args.ID)
 	}
+	if c.Options.FilestoreDir == "" {
+		return fmt.Errorf("filestore directory is empty for %s", args.ID)
+	}
 	if err := os.MkdirAll(c.RootDir, 0711); err != nil {
 		return fmt.Errorf("create runsc root %s: %w", c.RootDir, err)
 	}
@@ -112,7 +115,10 @@ func (c *Client) Create(ctx context.Context, args StartArgs) error {
 	if c.Options.DebugLogPath != "" {
 		cmdArgs = append(cmdArgs, "-debug-log="+c.Options.DebugLogPath)
 	}
-	cmdArgs = append(cmdArgs, "--overlay2="+rootMemoryOverlay(c.Options.OverlayTmpfsSize))
+	cmdArgs = append(cmdArgs, "--overlay2="+rootFileOverlay(
+		c.Options.FilestoreDir,
+		c.Options.OverlayTmpfsSize,
+	))
 	cmdArgs = append(cmdArgs, "create")
 	cmdArgs = append(cmdArgs,
 		"--bundle", args.BundleDir,
@@ -138,11 +144,12 @@ func (c *Client) Create(ctx context.Context, args StartArgs) error {
 	return nil
 }
 
-func rootMemoryOverlay(size string) string {
+func rootFileOverlay(dir, size string) string {
+	overlay := "root:dir=" + dir
 	if size == "" {
-		return "root:memory"
+		return overlay
 	}
-	return "root:memory,size=" + size
+	return overlay + ",size=" + size
 }
 
 func (c *Client) globalArgs() []string {
