@@ -136,14 +136,13 @@ type ResourceConfig struct {
 }
 
 // NormalizeCPULimitMode validates the configured CPU control mode. An empty
-// value keeps backward compatibility with configurations written before the
-// option was introduced.
+// value selects quota, the default enforcement mode.
 func NormalizeCPULimitMode(value string) (string, error) {
 	switch normalized := strings.ToLower(strings.TrimSpace(value)); normalized {
-	case "", CPULimitModeShares:
-		return CPULimitModeShares, nil
-	case CPULimitModeQuota:
+	case "", CPULimitModeQuota:
 		return CPULimitModeQuota, nil
+	case CPULimitModeShares:
+		return CPULimitModeShares, nil
 	default:
 		return "", fmt.Errorf(
 			"cpu_limit_mode must be %q or %q, got %q",
@@ -182,7 +181,7 @@ func DefaultConfig() Config {
 			},
 			ResourceConfig: ResourceConfig{
 				MaxInstanceNum:     DefaultMaxSandboxNum,
-				CPULimitMode:       CPULimitModeShares,
+				CPULimitMode:       CPULimitModeQuota,
 				CgroupRootName:     DefaultCgroupRoot,
 				CgroupCacheSize:    DefaultMaxSandboxNum,
 				InterfaceCacheSize: DefaultMaxSandboxNum,

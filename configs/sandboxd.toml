@@ -26,7 +26,7 @@ nat_backend = "iptables"
 disable_cgroup = false
 # "shares" preserves relative CPU weighting. "quota" applies a CFS bandwidth
 # limit and lets runsc and Kata derive CPU topology from the requested CPU.
-cpu_limit_mode = "shares"
+cpu_limit_mode = "quota"
 cgroup_cache_size = 1
 # Maximum processes per sandbox. Omit or set to 0 for unlimited.
 # pids_max = 4096

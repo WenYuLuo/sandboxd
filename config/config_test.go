@@ -22,7 +22,7 @@ func TestNormalizeCPULimitMode(t *testing.T) {
 		want    string
 		wantErr bool
 	}{
-		{input: "", want: CPULimitModeShares},
+		{input: "", want: CPULimitModeQuota},
 		{input: " shares ", want: CPULimitModeShares},
 		{input: "QUOTA", want: CPULimitModeQuota},
 		{input: "cpuset", wantErr: true},
@@ -41,5 +41,11 @@ func TestNormalizeCPULimitMode(t *testing.T) {
 		if got != test.want {
 			t.Errorf("NormalizeCPULimitMode(%q) = %q, want %q", test.input, got, test.want)
 		}
+	}
+}
+
+func TestDefaultConfigUsesCPUQuota(t *testing.T) {
+	if got := DefaultConfig().CPULimitMode; got != CPULimitModeQuota {
+		t.Fatalf("DefaultConfig cpu limit mode = %q, want %q", got, CPULimitModeQuota)
 	}
 }
