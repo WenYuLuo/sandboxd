@@ -22,6 +22,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/inclusionAI/sandboxd/config"
+
 	"github.com/containerd/cgroups/v3"
 	"github.com/containerd/cgroups/v3/cgroup2"
 	"github.com/opencontainers/runtime-spec/specs-go"
@@ -120,6 +122,7 @@ func (o *cgroupV2) reset(name string) error {
 	groupPath := filepath.Join(o.mountpoint, name)
 	values := map[string]string{
 		"cpu.weight": defaultV2CPUWeight,
+		"cpu.max":    "max " + strconv.FormatUint(config.DefaultCPUPeriodMicros, 10),
 		"memory.max": defaultV2MemoryMax,
 	}
 	for filename, value := range values {

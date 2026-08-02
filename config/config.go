@@ -16,6 +16,17 @@
 
 package config
 
+import (
+	"fmt"
+	"strings"
+)
+
+const (
+	CPULimitModeShares     = "shares"
+	CPULimitModeQuota      = "quota"
+	DefaultCPUPeriodMicros = uint64(100000)
+)
+
 // Config contains all configurations for sandbox server.
 type Config struct {
 	// PluginConfig is the config for sandbox plugin.
@@ -101,6 +112,11 @@ type KataConfig struct {
 type ResourceConfig struct {
 	MaxInstanceNum int `toml:"max_instance_num" json:"maxInstanceNum"`
 
+	// CPULimitMode controls how requested CPU millicores are enforced. Shares
+	// preserves the historical relative-weight behavior, while quota applies a
+	// CFS bandwidth limit that runtimes can use to size their CPU topology.
+	CPULimitMode string `toml:"cpu_limit_mode" json:"cpuLimitMode"`
+
 	// DisableCgroup enables an experimental/debug compatibility mode that
 	// prevents sandboxd and its runtimes from writing cgroups. Sandboxes
 	// inherit sandboxd's current cgroup, and per-sandbox resource limits are
@@ -117,6 +133,25 @@ type ResourceConfig struct {
 	PidsMax int64 `toml:"pids_max" json:"pidsMax"`
 	// InterfaceCacheSize is the size of interface cache. Default is same as max_instance_num.
 	InterfaceCacheSize int `toml:"interface_cache_size" json:"interfaceCacheSize"`
+}
+
+// NormalizeCPULimitMode validates the configured CPU control mode. An empty
+// value keeps backward compatibility with configurations written before the
+// option was introduced.
+func NormalizeCPULimitMode(value string) (string, error) {
+	switch normalized := strings.ToLower(strings.TrimSpace(value)); normalized {
+	case "", CPULimitModeShares:
+		return CPULimitModeShares, nil
+	case CPULimitModeQuota:
+		return CPULimitModeQuota, nil
+	default:
+		return "", fmt.Errorf(
+			"cpu_limit_mode must be %q or %q, got %q",
+			CPULimitModeShares,
+			CPULimitModeQuota,
+			value,
+		)
+	}
 }
 
 // NetworkConfig contains network-related configuration for sandboxd.
@@ -147,6 +182,7 @@ func DefaultConfig() Config {
 			},
 			ResourceConfig: ResourceConfig{
 				MaxInstanceNum:     DefaultMaxSandboxNum,
+				CPULimitMode:       CPULimitModeShares,
 				CgroupRootName:     DefaultCgroupRoot,
 				CgroupCacheSize:    DefaultMaxSandboxNum,
 				InterfaceCacheSize: DefaultMaxSandboxNum,

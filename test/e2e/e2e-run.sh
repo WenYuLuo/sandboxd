@@ -34,6 +34,7 @@ BRIDGE_NAME="${E2E_BRIDGE_NAME:-sandbox0}"
 STRESS_ROUNDS="${E2E_STRESS_ROUNDS:-0}"
 STRESS_CONCURRENCY="${E2E_STRESS_CONCURRENCY:-8}"
 DISABLE_CGROUP="${E2E_DISABLE_CGROUP:-0}"
+CPU_LIMIT_MODE="${E2E_CPU_LIMIT_MODE:-shares}"
 export RUNSC_IGNORE_CGROUPS="${DISABLE_CGROUP}"
 
 SANDBOXD_PID=""
@@ -134,6 +135,7 @@ preflight() {
     [[ "${STRESS_ROUNDS}" =~ ^[0-9]+$ ]] || fail "E2E_STRESS_ROUNDS must be a non-negative integer"
     [[ "${STRESS_CONCURRENCY}" =~ ^[1-8]$ ]] || fail "E2E_STRESS_CONCURRENCY must be between 1 and 8"
     [[ "${DISABLE_CGROUP}" =~ ^[01]$ ]] || fail "E2E_DISABLE_CGROUP must be 0 or 1"
+    [[ "${CPU_LIMIT_MODE}" =~ ^(shares|quota)$ ]] || fail "E2E_CPU_LIMIT_MODE must be shares or quota"
 
     local bin
     for bin in sandboxd sbox runsc ip iptables busybox; do
@@ -243,6 +245,7 @@ nat_backend = "iptables"
 
 [plugin.resource]
 disable_cgroup = ${disable_cgroup}
+cpu_limit_mode = "${CPU_LIMIT_MODE}"
 cgroup_cache_size = 1
 interface_cache_size = 1
 cgroup_root_name = "/${CGROUP_ROOT}"
@@ -422,18 +425,33 @@ assert_cgroup_limits() {
     if [ "${shares}" -lt 2 ]; then
         shares=2
     fi
+    local quota=$((cpu_millicores * 100))
+    if [ "${quota}" -lt 1000 ]; then
+        quota=1000
+    fi
     local memory_bytes=$((memory_mb * 1024 * 1024))
 
     if [ "${CGROUP_MODE}" = "v2" ]; then
-        local weight=$((1 + (shares - 2) * 9999 / 262142))
-        assert_eq "$(tr -d '\n' < "${child}/cpu.weight")" "${weight}" "v2 cpu.weight"
+        if [ "${CPU_LIMIT_MODE}" = "quota" ]; then
+            assert_eq "$(tr -d '\n' < "${child}/cpu.weight")" "100" "v2 default cpu.weight"
+            assert_eq "$(tr -d '\n' < "${child}/cpu.max")" "${quota} 100000" "v2 cpu.max"
+        else
+            local weight=$((1 + (shares - 2) * 9999 / 262142))
+            assert_eq "$(tr -d '\n' < "${child}/cpu.weight")" "${weight}" "v2 cpu.weight"
+            assert_eq "$(tr -d '\n' < "${child}/cpu.max")" "max 100000" "v2 unlimited cpu.max"
+        fi
         assert_eq "$(tr -d '\n' < "${child}/memory.max")" "${memory_bytes}" "v2 memory.max"
         assert_eq "$(tr -d '\n' < "${child}/pids.max")" "64" "v2 pids.max"
     else
-        assert_eq \
-            "$(tr -d '\n' < "${CPU_CGROUP_DIR}/${CGROUP_ROOT}/${group_name}/cpu.shares")" \
-            "${shares}" \
-            "v1 cpu.shares"
+        local cpu_path="${CPU_CGROUP_DIR}/${CGROUP_ROOT}/${group_name}"
+        if [ "${CPU_LIMIT_MODE}" = "quota" ]; then
+            assert_eq "$(tr -d '\n' < "${cpu_path}/cpu.shares")" "1024" "v1 default cpu.shares"
+            assert_eq "$(tr -d '\n' < "${cpu_path}/cpu.cfs_quota_us")" "${quota}" "v1 cpu quota"
+            assert_eq "$(tr -d '\n' < "${cpu_path}/cpu.cfs_period_us")" "100000" "v1 cpu period"
+        else
+            assert_eq "$(tr -d '\n' < "${cpu_path}/cpu.shares")" "${shares}" "v1 cpu.shares"
+            assert_eq "$(tr -d '\n' < "${cpu_path}/cpu.cfs_quota_us")" "-1" "v1 unlimited cpu quota"
+        fi
         assert_eq "$(tr -d '\n' < "${child}/memory.limit_in_bytes")" "${memory_bytes}" "v1 memory.limit"
         assert_eq \
             "$(tr -d '\n' < "/sys/fs/cgroup/pids/${CGROUP_ROOT}/${group_name}/pids.max")" \
@@ -593,13 +611,17 @@ run_checks() {
         --runtime runsc \
         --sandbox-id sbox-e2e-reuse \
         --rootfs "${ROOTFS}" \
-        --cpu-millicores 1000 \
+        --cpu-millicores 1500 \
         --memory-mb 256 \
         /bin/sleep 300)"
     local reused_cgroup
     reused_cgroup="$(wait_for_cgroup_child)"
     assert_eq "${reused_cgroup}" "${cache_cgroup}" "cached cgroup path"
-    assert_cgroup_limits "${reused_cgroup}" 1000 256
+    assert_cgroup_limits "${reused_cgroup}" 1500 256
+    if [ "${CPU_LIMIT_MODE}" = "quota" ]; then
+        got="$(sbox_cmd exec "${SANDBOX_ID}" /bin/nproc)"
+        assert_eq "${got}" "2" "runsc guest CPU count"
+    fi
     sbox_cmd exec "${SANDBOX_ID}" /bin/kill -TERM 1
     wait_for_state "${SANDBOX_ID}" "SANDBOX_STATE_EXITED"
     assert_wait_log "${SANDBOX_ID}" false

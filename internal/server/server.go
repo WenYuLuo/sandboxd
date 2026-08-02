@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -546,6 +547,11 @@ func NewSandboxService(root, configPath string) (result SandboxService, retErr e
 	if err := validateRuntimeFilestore(cfg.RuntimeConfig); err != nil {
 		return nil, err
 	}
+	cpuLimitMode, err := config.NormalizeCPULimitMode(cfg.CPULimitMode)
+	if err != nil {
+		return nil, fmt.Errorf("resource configuration: %w", err)
+	}
+	cfg.CPULimitMode = cpuLimitMode
 
 	natBackend, err := resolveNATBackend(cfg.NatBackend)
 	if err != nil {
@@ -752,24 +758,39 @@ func (h *sandboxService) Delete(ctx context.Context, request *runtime.DeleteRequ
 
 // resourcesToLinux converts a StartRequest.Resources map (CPU millicore, Memory MB)
 // to LinuxSandboxResources. Returns defaults if the map is nil or empty.
-func resourcesToLinux(resources map[string]float64) *runtime.LinuxSandboxResources {
+func resourcesToLinux(
+	resources map[string]float64,
+	cpuLimitMode string,
+) *runtime.LinuxSandboxResources {
 	const (
-		defaultCpuShares        = uint64(512)
+		defaultCPUMillicores    = float64(500)
+		minimumCPUQuota         = int64(1000)
 		defaultMemoryLimitBytes = int64(4 * 1024 * 1024 * 1024) // 4GB
 	)
 
 	res := &runtime.LinuxSandboxResources{
-		CpuShares:          defaultCpuShares,
 		MemoryLimitInBytes: defaultMemoryLimitBytes,
 	}
-
-	if len(resources) == 0 {
-		return res
-	}
+	cpuMillicores := defaultCPUMillicores
 
 	if cpu, ok := resources["CPU"]; ok && cpu > 0 {
+		cpuMillicores = cpu
+	}
+
+	if cpuLimitMode == config.CPULimitModeQuota {
+		quota := math.Ceil(cpuMillicores * float64(config.DefaultCPUPeriodMicros) / 1000)
+		if quota < float64(minimumCPUQuota) {
+			quota = float64(minimumCPUQuota)
+		}
+		if quota >= float64(math.MaxInt64) {
+			res.CpuQuota = math.MaxInt64
+		} else {
+			res.CpuQuota = int64(quota)
+		}
+		res.CpuPeriod = config.DefaultCPUPeriodMicros
+	} else {
 		// CPU is in millicore (1000 = 1 core). Convert to cpu.shares (1024 = 1 core).
-		res.CpuShares = uint64(cpu * 1024 / 1000)
+		res.CpuShares = uint64(cpuMillicores * 1024 / 1000)
 		if res.CpuShares < 2 {
 			res.CpuShares = 2 // minimum cpu.shares
 		}
@@ -952,7 +973,7 @@ func (h *sandboxService) Start(ctx context.Context, request *runtime.StartReques
 		annotations[key] = value
 	}
 
-	sandboxResources := resourcesToLinux(startReq.Resources)
+	sandboxResources := resourcesToLinux(startReq.Resources, h.config.CPULimitMode)
 	if h.config.DisableCgroup {
 		sandboxResources = nil
 	}

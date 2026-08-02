@@ -650,13 +650,9 @@ func TestRecoverShimsCleansDeadKataBundle(t *testing.T) {
 func TestPrepareKataResourceSpec(t *testing.T) {
 	bundlePath := t.TempDir()
 	shares := uint64(1536)
-	quota := int64(100000)
-	period := uint64(100000)
 	memory := int64(2 * 1024 * 1024 * 1024)
 	resource := &runtime.LinuxSandboxResources{
 		CpuShares:          shares,
-		CpuQuota:           quota,
-		CpuPeriod:          period,
 		MemoryLimitInBytes: memory,
 	}
 	spec := defaultSandboxSpec()
@@ -693,6 +689,41 @@ func TestPrepareKataResourceSpec(t *testing.T) {
 		restored.Linux.Resources.Memory.Limit == nil ||
 		*restored.Linux.Resources.Memory.Limit != memory {
 		t.Fatal("restored spec did not retain the sandbox memory limit")
+	}
+}
+
+func TestPrepareKataResourceSpecUsesQuotaForVCPUs(t *testing.T) {
+	bundlePath := t.TempDir()
+	resource := &runtime.LinuxSandboxResources{
+		CpuQuota:  150000,
+		CpuPeriod: 100000,
+	}
+	spec := defaultSandboxSpec()
+	setSpecResource(spec, resource)
+	if err := writeKataSpec(filepath.Join(bundlePath, "config.json"), spec); err != nil {
+		t.Fatal(err)
+	}
+	restore, err := prepareKataResourceSpec(bundlePath, resource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shimSpec := loadKataTestSpec(t, bundlePath)
+	if got := shimSpec.Annotations[kataDefaultVCPUsAnnotation]; got != "2" {
+		t.Fatalf("vCPU annotation = %q, want 2", got)
+	}
+	if shimSpec.Linux.Resources.CPU.Quota != nil || shimSpec.Linux.Resources.CPU.Period != nil {
+		t.Fatal("shim-facing spec retained CPU quota")
+	}
+
+	if err := restore(); err != nil {
+		t.Fatal(err)
+	}
+	restored := loadKataTestSpec(t, bundlePath)
+	if restored.Linux.Resources.CPU.Quota == nil ||
+		*restored.Linux.Resources.CPU.Quota != resource.CpuQuota ||
+		restored.Linux.Resources.CPU.Period == nil ||
+		*restored.Linux.Resources.CPU.Period != resource.CpuPeriod {
+		t.Fatal("restored spec did not retain CPU quota")
 	}
 }
 
@@ -749,7 +780,7 @@ func TestRemoveKataNetworkNamespace(t *testing.T) {
 	}
 }
 
-func TestKataHostResourcesUsesCPUShares(t *testing.T) {
+func TestKataHostResourcesRetainsCPUControls(t *testing.T) {
 	original := &runtime.LinuxSandboxResources{
 		CpuShares:          1536,
 		CpuQuota:           100000,
@@ -758,13 +789,16 @@ func TestKataHostResourcesUsesCPUShares(t *testing.T) {
 	}
 	host := kataHostResources(original)
 	if host.CpuShares != original.CpuShares ||
+		host.CpuQuota != original.CpuQuota ||
+		host.CpuPeriod != original.CpuPeriod ||
 		host.MemoryLimitInBytes != original.MemoryLimitInBytes {
 		t.Fatalf("host resources = %+v", host)
 	}
-	if host.CpuQuota != 0 || host.CpuPeriod != 0 {
-		t.Fatalf("host resources retained CPU quota: %+v", host)
+	if host == original {
+		t.Fatal("kataHostResources returned the caller's resource object")
 	}
-	if original.CpuQuota == 0 || original.CpuPeriod == 0 {
+	host.CpuQuota = 0
+	if original.CpuQuota == 0 {
 		t.Fatal("kataHostResources mutated the caller")
 	}
 }

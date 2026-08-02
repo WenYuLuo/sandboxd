@@ -26,6 +26,7 @@ RUN_UNIT_TESTS="${RUN_UNIT_TESTS:-1}"
 RUNSC_BINARY="${RUNSC_BINARY:-}"
 E2E_STRESS_ROUNDS="${E2E_STRESS_ROUNDS:-0}"
 E2E_STRESS_CONCURRENCY="${E2E_STRESS_CONCURRENCY:-8}"
+E2E_CPU_LIMIT_MODE="${E2E_CPU_LIMIT_MODE:-quota}"
 
 log() {
     printf '[e2e-run] %s\n' "$*"
@@ -88,6 +89,7 @@ set +e
     --net bridge \
     -e "E2E_STRESS_ROUNDS=${E2E_STRESS_ROUNDS}" \
     -e "E2E_STRESS_CONCURRENCY=${E2E_STRESS_CONCURRENCY}" \
+    -e "E2E_CPU_LIMIT_MODE=${E2E_CPU_LIMIT_MODE}" \
     -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
     "${IMAGE}"
 status=$?
@@ -106,6 +108,7 @@ set +e
     --privileged \
     --net bridge \
     -e E2E_DISABLE_CGROUP=1 \
+    -e E2E_CPU_LIMIT_MODE=shares \
     -v /sys/fs/cgroup:/sys/fs/cgroup:ro \
     "${IMAGE}"
 status=$?

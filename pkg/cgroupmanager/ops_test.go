@@ -74,8 +74,8 @@ func TestSandboxResourcesConvertCoreControls(t *testing.T) {
 	require.NotNil(t, linux.CPU)
 	require.NotNil(t, linux.Memory)
 	assert.Equal(t, resource.CpuShares, *linux.CPU.Shares)
-	assert.Nil(t, linux.CPU.Quota)
-	assert.Nil(t, linux.CPU.Period)
+	assert.Equal(t, resource.CpuQuota, *linux.CPU.Quota)
+	assert.Equal(t, resource.CpuPeriod, *linux.CPU.Period)
 	assert.Empty(t, linux.CPU.Cpus)
 	assert.Empty(t, linux.CPU.Mems)
 	assert.Equal(t, resource.MemoryLimitInBytes, *linux.Memory.Limit)
@@ -84,6 +84,7 @@ func TestSandboxResourcesConvertCoreControls(t *testing.T) {
 	require.NotNil(t, v2.CPU)
 	require.NotNil(t, v2.CPU.Weight)
 	assert.Equal(t, uint64(1+((1024-2)*9999)/262142), *v2.CPU.Weight)
+	assert.Equal(t, "50000 100000", string(v2.CPU.Max))
 	require.NotNil(t, v2.Memory)
 	assert.Equal(t, resource.MemoryLimitInBytes, *v2.Memory.Max)
 }
@@ -366,7 +367,7 @@ func TestV2ResetAndStats(t *testing.T) {
 	ops := &cgroupV2{mountpoint: mountpoint}
 	require.NoError(t, ops.reset(name))
 	assertFileContents(t, filepath.Join(groupPath, "cpu.weight"), "100")
-	assertFileContents(t, filepath.Join(groupPath, "cpu.max"), "50000 100000")
+	assertFileContents(t, filepath.Join(groupPath, "cpu.max"), "max 100000")
 	assertFileContents(t, filepath.Join(groupPath, "memory.max"), "max")
 	assertFileContents(t, filepath.Join(groupPath, "memory.swap.max"), "268435456")
 	assertFileContents(t, filepath.Join(groupPath, "pids.max"), "1024")

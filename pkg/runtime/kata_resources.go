@@ -38,15 +38,12 @@ func kataHostResources(
 	if resource == nil {
 		return nil
 	}
-	result := proto.Clone(resource).(*runtime.LinuxSandboxResources)
-	result.CpuQuota = 0
-	result.CpuPeriod = 0
-	return result
+	return proto.Clone(resource).(*runtime.LinuxSandboxResources)
 }
 
 // HostCgroupResources maps sandbox resources to the host cgroup enclosing a
-// runtime. Kata keeps CPU quota/period inside its VM topology, while runsc uses
-// the request unchanged.
+// runtime. Kata receives a clone because its shim-facing OCI spec is sanitized
+// separately, while the outer VM cgroup retains the requested CPU controls.
 func HostCgroupResources(
 	runtimeName string,
 	resource *runtime.LinuxSandboxResources,
@@ -57,11 +54,12 @@ func HostCgroupResources(
 	return resource
 }
 
-// prepareKataResourceSpec gives the VM an explicit topology while keeping the
-// sandbox cgroup on CPU shares. Kata's dynamic resource manager would otherwise
-// interpret the container memory limit as memory to add on top of the VM's
-// configured memory. The shim-facing spec therefore omits memory sizing fields;
-// the complete spec is restored after Task.Create for sandboxd bookkeeping.
+// prepareKataResourceSpec gives the VM an explicit topology while its outer
+// cgroup independently enforces shares or quota. Kata's dynamic resource
+// manager would otherwise interpret container CPU and memory limits as
+// resources to add on top of the VM's configured topology. The shim-facing
+// spec therefore omits those sizing fields; the complete spec is restored
+// after Task.Create for sandboxd bookkeeping.
 func prepareKataResourceSpec(
 	bundlePath string,
 	resource *runtime.LinuxSandboxResources,
@@ -79,13 +77,7 @@ func prepareKataResourceSpec(
 		completeSpec.Annotations = make(map[string]string)
 	}
 
-	vcpus := uint64(1)
-	if resource != nil && resource.CpuShares > 0 {
-		vcpus = (resource.CpuShares + 1023) / 1024
-		if vcpus == 0 {
-			vcpus = 1
-		}
-	}
+	vcpus := kataVCPUs(resource)
 	completeSpec.Annotations[kataDefaultVCPUsAnnotation] = strconv.FormatUint(vcpus, 10)
 
 	if resource != nil && resource.MemoryLimitInBytes > 0 {
@@ -121,6 +113,20 @@ func prepareKataResourceSpec(
 		return os.Rename(temporaryPath, configPath)
 	}
 	return restore, nil
+}
+
+func kataVCPUs(resource *runtime.LinuxSandboxResources) uint64 {
+	if resource == nil {
+		return 1
+	}
+	if resource.CpuQuota > 0 && resource.CpuPeriod > 0 {
+		quota := uint64(resource.CpuQuota)
+		return (quota-1)/resource.CpuPeriod + 1
+	}
+	if resource.CpuShares > 0 {
+		return (resource.CpuShares-1)/1024 + 1
+	}
+	return 1
 }
 
 func sanitizeKataShimResources(spec *Spec) {

@@ -23,6 +23,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/inclusionAI/sandboxd/config"
+
 	"github.com/containerd/cgroups/v3"
 	cg "github.com/containerd/cgroups/v3/cgroup1"
 	"github.com/opencontainers/runtime-spec/specs-go"
@@ -30,6 +32,7 @@ import (
 
 const (
 	defaultV1CPUShares  = uint64(1024)
+	defaultV1CPUQuota   = int64(-1)
 	defaultV1MemoryMax  = int64(-1)
 	unlimitedPidsString = "max"
 )
@@ -77,9 +80,15 @@ func (*cgroupV1) create(name string, resources *specs.LinuxResources) error {
 
 func (*cgroupV1) reset(name string) error {
 	shares := defaultV1CPUShares
+	period := config.DefaultCPUPeriodMicros
+	quota := defaultV1CPUQuota
 	memoryLimit := defaultV1MemoryMax
 	resources := &specs.LinuxResources{
-		CPU:    &specs.LinuxCPU{Shares: &shares},
+		CPU: &specs.LinuxCPU{
+			Shares: &shares,
+			Period: &period,
+			Quota:  &quota,
+		},
 		Memory: &specs.LinuxMemory{Limit: &memoryLimit},
 	}
 	group, err := cg.Load(cg.StaticPath(name), cg.WithHiearchy(cg.Default))

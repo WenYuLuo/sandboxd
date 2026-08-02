@@ -116,8 +116,17 @@ func sandboxResources(resource *runtime.LinuxSandboxResources) *specs.LinuxResou
 	}
 
 	result := &specs.LinuxResources{}
-	if resource.CpuShares > 0 {
-		result.CPU = &specs.LinuxCPU{Shares: &resource.CpuShares}
+	if resource.CpuShares > 0 || resource.CpuQuota > 0 || resource.CpuPeriod > 0 {
+		result.CPU = &specs.LinuxCPU{}
+		if resource.CpuShares > 0 {
+			result.CPU.Shares = &resource.CpuShares
+		}
+		if resource.CpuQuota > 0 {
+			result.CPU.Quota = &resource.CpuQuota
+		}
+		if resource.CpuPeriod > 0 {
+			result.CPU.Period = &resource.CpuPeriod
+		}
 	}
 	if resource.MemoryLimitInBytes > 0 {
 		result.Memory = &specs.LinuxMemory{
