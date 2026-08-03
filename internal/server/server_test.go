@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -309,7 +310,7 @@ func TestList_ByLabel(t *testing.T) {
 	}
 }
 
-func TestDelete_NotFound(t *testing.T) {
+func TestDelete_NotFoundIsIdempotent(t *testing.T) {
 	s := newTestService(t, map[string]svc.Handler{
 		"runsc": svc.NewFakeRuntimeHandler(),
 	})
@@ -317,7 +318,7 @@ func TestDelete_NotFound(t *testing.T) {
 	_, err := s.Delete(context.Background(), &runtime.DeleteRequest{
 		ID: "sbox-nonexistent",
 	})
-	assert.Error(t, err)
+	assert.NoError(t, err)
 }
 
 type recordingDeleteHandler struct {
@@ -358,6 +359,98 @@ func TestDeleteRoutesSandboxIDToRuntime(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, 1, handler.calls)
 	assert.Equal(t, id, handler.sandboxID)
+}
+
+type blockingDeleteHandler struct {
+	*svc.FakeRuntimeHandler
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+	calls   atomic.Int32
+}
+
+func (h *blockingDeleteHandler) Delete(ctx context.Context, _ string) error {
+	h.calls.Add(1)
+	h.once.Do(func() { close(h.started) })
+	select {
+	case <-h.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func storeSandboxForDelete(t *testing.T, s *sandboxService, id string) {
+	t.Helper()
+	bundleDir := filepath.Join(s.config.RootDir, "containers", id)
+	assert.NoError(t, os.MkdirAll(bundleDir, 0755))
+	assert.NoError(t, os.WriteFile(
+		filepath.Join(bundleDir, config.SandboxSpecFile),
+		[]byte(`{"ociVersion":"1.0.2","process":{"cwd":"/"},"root":{"path":"rootfs"},"linux":{"cgroupsPath":""},"annotations":{}}`),
+		0600,
+	))
+	assert.NoError(t, s.sandboxManager.StoreMetadata(id, &runtime.SandboxMetadata{
+		ID:             id,
+		RuntimeHandler: "runsc",
+	}))
+}
+
+func TestDeleteCoalescesConcurrentRequestsAfterCallerTimeout(t *testing.T) {
+	handler := &blockingDeleteHandler{
+		FakeRuntimeHandler: svc.NewFakeRuntimeHandler(),
+		started:            make(chan struct{}),
+		release:            make(chan struct{}),
+	}
+	s := newTestService(t, map[string]svc.Handler{"runsc": handler})
+	const id = "sbox-concurrent-delete"
+	storeSandboxForDelete(t, s, id)
+
+	firstCtx, cancelFirst := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancelFirst()
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := s.Delete(firstCtx, &runtime.DeleteRequest{ID: id})
+		firstDone <- err
+	}()
+
+	select {
+	case <-handler.started:
+	case <-time.After(time.Second):
+		t.Fatal("runtime delete did not start")
+	}
+
+	select {
+	case err := <-firstDone:
+		assert.ErrorIs(t, err, context.DeadlineExceeded)
+	case <-time.After(time.Second):
+		t.Fatal("first delete did not honor caller timeout")
+	}
+
+	secondDone := make(chan error, 1)
+	go func() {
+		_, err := s.Delete(context.Background(), &runtime.DeleteRequest{ID: id})
+		secondDone <- err
+	}()
+
+	select {
+	case err := <-secondDone:
+		t.Fatalf("second delete returned before shared cleanup completed: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	assert.Equal(t, int32(1), handler.calls.Load())
+
+	close(handler.release)
+	select {
+	case err := <-secondDone:
+		assert.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("second delete did not receive shared cleanup result")
+	}
+	assert.Equal(t, int32(1), handler.calls.Load())
+
+	_, err := s.Delete(context.Background(), &runtime.DeleteRequest{ID: id})
+	assert.NoError(t, err)
+	assert.Equal(t, int32(1), handler.calls.Load())
 }
 
 func TestStart_And_Delete(t *testing.T) {
