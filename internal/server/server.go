@@ -49,6 +49,7 @@ import (
 	cmap "github.com/orcaman/concurrent-map/v2"
 	"github.com/pelletier/go-toml"
 	"github.com/sirupsen/logrus"
+	"golang.org/x/sync/singleflight"
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/proto"
 )
@@ -90,6 +91,7 @@ type sandboxService struct {
 
 	ready         atomic.Bool
 	recoveryReady atomic.Bool
+	deleteGroup   singleflight.Group
 }
 
 // loadRuntimeHandlers loads runtime handlers with exponential backoff.
@@ -223,6 +225,9 @@ func (h *sandboxService) deleteSandboxRuntime(ctx context.Context, sandboxID str
 
 	c, err := h.sandboxManager.Get(sandboxID)
 	if err != nil {
+		if errors.Is(err, errord.ErrNotFound) {
+			return nil
+		}
 		return errord.ToGRPC(err)
 	}
 
@@ -260,6 +265,28 @@ func (h *sandboxService) deleteSandboxRuntime(ctx context.Context, sandboxID str
 
 	h.sandboxManager.Delete(sandboxID)
 	return nil
+}
+
+// deleteSandbox coalesces concurrent delete requests for the same sandbox.
+// Cleanup runs independently from the initiating caller's cancellation so a
+// timed-out RPC cannot leave a partially deleted sandbox for another caller to
+// release again.
+func (h *sandboxService) deleteSandbox(ctx context.Context, sandboxID string) error {
+	resultCh := h.deleteGroup.DoChan(sandboxID, func() (interface{}, error) {
+		cleanupCtx := context.WithoutCancel(ctx)
+
+		if h.networkMgr != nil {
+			h.networkMgr.cleanupDnatRules(sandboxID)
+		}
+		return nil, h.deleteSandboxRuntime(cleanupCtx, sandboxID)
+	})
+
+	select {
+	case result := <-resultCh:
+		return result.Err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (h *sandboxService) List(ctx context.Context, request *runtime.ListSandboxesRequest) (*runtime.ListSandboxesResponse, error) {
@@ -383,14 +410,9 @@ func (h *sandboxService) Shutdown() {
 			continue
 		}
 		id := c.Metadata.ID
-		if h.networkMgr != nil {
-			h.networkMgr.cleanupDnatRules(id)
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		if err := h.deleteSandboxRuntime(ctx, id); err != nil {
+		if err := h.deleteSandbox(context.Background(), id); err != nil {
 			logrus.Warnf("shutdown: failed to delete sandbox %s: %v", id, err)
 		}
-		cancel()
 
 	}
 
@@ -778,10 +800,7 @@ func validateRuntimeFilestore(runtimeConfig config.RuntimeConfig) error {
 }
 
 func (h *sandboxService) Delete(ctx context.Context, request *runtime.DeleteRequest) (response *runtime.DeleteResponse, err error) {
-	// Clean up DNAT rules before deleting sandbox
-	h.networkMgr.cleanupDnatRules(request.ID)
-
-	err = h.deleteSandboxRuntime(ctx, request.ID)
+	err = h.deleteSandbox(ctx, request.ID)
 	return response, err
 }
 
