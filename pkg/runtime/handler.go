@@ -41,6 +41,7 @@ type StartConfig struct {
 	Command                 []string
 	Mounts                  []*runtime.Mount
 	Rootfs                  string
+	RootfsReadonly          bool
 	Resources               *runtime.LinuxSandboxResources
 	Envs                    []*runtime.KeyValue
 	Stdout                  string

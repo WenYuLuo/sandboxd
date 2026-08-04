@@ -1151,6 +1151,7 @@ func (h *sandboxService) Start(ctx context.Context, request *runtime.StartReques
 		Hostname:                defaults.Hostname,
 		Command:                 startReq.Command,
 		Rootfs:                  preparedFilesystem.RootfsPath(),
+		RootfsReadonly:          startReq.Rootfs.GetReadonly(),
 		Resources:               sandboxResources,
 		Mounts:                  sandboxFiles.Mounts(),
 		Envs:                    env,

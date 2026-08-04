@@ -165,7 +165,7 @@ func TestPrepareKataDirectoryRootfsSeedsMountTargets(t *testing.T) {
 		Type:        "bind",
 		Source:      fileSource,
 		Destination: "/etc/resolv.conf",
-	}})
+	}}, true)
 	if err != nil {
 		t.Fatal(err)
 	}

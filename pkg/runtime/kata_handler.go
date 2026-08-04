@@ -148,6 +148,7 @@ func (k *KataHandler) Start(ctx context.Context, startConfig StartConfig) error 
 		kataConfig.Rootfs,
 		rootfsKind,
 		ociSpec.Mounts,
+		ociSpec.Root.Readonly,
 	)
 	if err != nil {
 		return errors.Join(

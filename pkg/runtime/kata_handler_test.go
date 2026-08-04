@@ -21,6 +21,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -208,7 +209,7 @@ func TestPrepareKataEROFSRootfs(t *testing.T) {
 		return syscall.EINVAL
 	}
 
-	plan, err := prepareKataRootfs(bundlePath, rootfsImage, kataRootfsEROFS, nil)
+	plan, err := prepareKataRootfs(bundlePath, rootfsImage, kataRootfsEROFS, nil, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -225,7 +226,8 @@ func TestPrepareKataEROFSRootfs(t *testing.T) {
 	}
 	if plan.mounts[0].Type != "bind" ||
 		plan.mounts[0].Source != rootfsDir ||
-		plan.mounts[0].Target != "/" {
+		plan.mounts[0].Target != "/" ||
+		!slices.Equal(plan.mounts[0].Options, []string{"rbind", "ro"}) {
 		t.Fatalf("unexpected rootfs mounts: %+v", plan.mounts)
 	}
 	data, err := os.ReadFile(filepath.Join(bundlePath, "config.json"))
@@ -236,7 +238,7 @@ func TestPrepareKataEROFSRootfs(t *testing.T) {
 	if err := json.Unmarshal(data, &spec); err != nil {
 		t.Fatal(err)
 	}
-	if spec.Root == nil || spec.Root.Path != kataRootfsDir || spec.Root.Readonly {
+	if spec.Root == nil || spec.Root.Path != kataRootfsDir || !spec.Root.Readonly {
 		t.Fatalf("root = %+v", spec.Root)
 	}
 

@@ -106,6 +106,56 @@ func TestGenerateOciPreservesEntrypoint(t *testing.T) {
 	}
 }
 
+func TestGenerateOciAppliesRequestedRootfsMode(t *testing.T) {
+	tests := []struct {
+		name               string
+		baseReadonly       bool
+		requestReadonly    bool
+		writableLayerBytes uint64
+		wantReadonly       bool
+	}{
+		{
+			name:            "readonly request overrides writable base",
+			requestReadonly: true,
+			wantReadonly:    true,
+		},
+		{
+			name:         "writable request overrides readonly base",
+			baseReadonly: true,
+		},
+		{
+			name:               "writable layer overrides readonly request",
+			requestReadonly:    true,
+			writableLayerBytes: 1,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			loader, err := NewBundleLoader("", t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			loader.baseSpec.Root.Readonly = tt.baseReadonly
+			_, spec, err := loader.GenerateOci(OciLoadOptions{
+				SandboxID:  "sandbox-rootfs-mode",
+				CgroupPath: "/sandbox/rootfs-mode",
+				Config: StartConfig{
+					Rootfs:                  t.TempDir(),
+					RootfsReadonly:          tt.requestReadonly,
+					Resources:               &runtime.LinuxSandboxResources{},
+					WritableLayerLimitBytes: tt.writableLayerBytes,
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if spec.Root.Readonly != tt.wantReadonly {
+				t.Fatalf("root readonly = %v, want %v", spec.Root.Readonly, tt.wantReadonly)
+			}
+		})
+	}
+}
+
 func TestGenerateOciAppliesProviderUpdatesLast(t *testing.T) {
 	loader, err := NewBundleLoader("", t.TempDir())
 	if err != nil {

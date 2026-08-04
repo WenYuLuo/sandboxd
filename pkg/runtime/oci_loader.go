@@ -135,6 +135,7 @@ func (r *BundleLoader) GenerateOci(options OciLoadOptions) (string, *Spec, error
 		ociSpec.Root = &Root{}
 	}
 	ociSpec.Root.Path = options.Config.Rootfs
+	ociSpec.Root.Readonly = options.Config.RootfsReadonly
 	if options.Config.WritableLayerLimitBytes > 0 {
 		// An explicit writable-layer quota necessarily requests a writable root.
 		// The image itself remains read-only; writes go to the quota-limited

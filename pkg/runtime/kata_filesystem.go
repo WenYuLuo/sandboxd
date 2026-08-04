@@ -104,12 +104,13 @@ func prepareKataRootfs(
 	source string,
 	kind kataRootfsKind,
 	mounts []Mount,
+	readonly bool,
 ) (*kataRootfsPlan, error) {
 	switch kind {
 	case kataRootfsDirectory:
-		return prepareKataDirectoryRootfs(bundlePath, source, mounts)
+		return prepareKataDirectoryRootfs(bundlePath, source, mounts, readonly)
 	case kataRootfsEROFS:
-		return prepareKataEROFSRootfs(bundlePath, source, mounts)
+		return prepareKataEROFSRootfs(bundlePath, source, mounts, readonly)
 	default:
 		return nil, fmt.Errorf("unsupported Kata rootfs kind %d", kind)
 	}
@@ -119,17 +120,19 @@ func prepareKataDirectoryRootfs(
 	bundlePath string,
 	lowerDir string,
 	mounts []Mount,
+	readonly bool,
 ) (*kataRootfsPlan, error) {
 	if err := cleanupKataRootfs(bundlePath); err != nil {
 		return nil, fmt.Errorf("clean previous Kata rootfs: %w", err)
 	}
-	return prepareKataOverlayRootfs(bundlePath, lowerDir, mounts)
+	return prepareKataOverlayRootfs(bundlePath, lowerDir, mounts, readonly)
 }
 
 func prepareKataOverlayRootfs(
 	bundlePath string,
 	lowerDir string,
 	mounts []Mount,
+	readonly bool,
 ) (*kataRootfsPlan, error) {
 	rootfsDir := filepath.Join(bundlePath, kataRootfsDir)
 	upperDir := filepath.Join(bundlePath, kataRootfsUpperDir)
@@ -152,8 +155,12 @@ func prepareKataOverlayRootfs(
 	if err := mountKataOverlay(lowerDir, upperDir, workDir, rootfsDir); err != nil {
 		return nil, fmt.Errorf("mount Kata directory rootfs at %s: %w", rootfsDir, err)
 	}
-	if err := rewriteKataRootPath(bundlePath); err != nil {
+	if err := rewriteKataRootPath(bundlePath, readonly); err != nil {
 		return nil, errors.Join(err, cleanupKataRootfs(bundlePath))
+	}
+	rootfsMode := "rw"
+	if readonly {
+		rootfsMode = "ro"
 	}
 
 	return &kataRootfsPlan{
@@ -161,7 +168,7 @@ func prepareKataOverlayRootfs(
 			Type:    "bind",
 			Source:  rootfsDir,
 			Target:  "/",
-			Options: []string{"rbind", "rw"},
+			Options: []string{"rbind", rootfsMode},
 		}},
 		cleanup: func() error { return cleanupKataRootfs(bundlePath) },
 	}, nil
@@ -171,6 +178,7 @@ func prepareKataEROFSRootfs(
 	bundlePath string,
 	source string,
 	mounts []Mount,
+	readonly bool,
 ) (*kataRootfsPlan, error) {
 	if err := cleanupKataRootfs(bundlePath); err != nil {
 		return nil, fmt.Errorf("clean previous Kata rootfs: %w", err)
@@ -179,14 +187,14 @@ func prepareKataEROFSRootfs(
 	if err := mountKataEROFSAt(source, lowerDir); err != nil {
 		return nil, err
 	}
-	plan, err := prepareKataOverlayRootfs(bundlePath, lowerDir, mounts)
+	plan, err := prepareKataOverlayRootfs(bundlePath, lowerDir, mounts, readonly)
 	if err != nil {
 		return nil, errors.Join(err, cleanupKataRootfs(bundlePath))
 	}
 	return plan, nil
 }
 
-func rewriteKataRootPath(bundlePath string) error {
+func rewriteKataRootPath(bundlePath string, readonly bool) error {
 	configPath := filepath.Join(bundlePath, "config.json")
 	data, err := os.ReadFile(configPath)
 	if err != nil {
@@ -200,7 +208,7 @@ func rewriteKataRootPath(bundlePath string) error {
 		ociSpec.Root = &Root{}
 	}
 	ociSpec.Root.Path = kataRootfsDir
-	ociSpec.Root.Readonly = false
+	ociSpec.Root.Readonly = readonly
 	return writeKataSpec(configPath, &ociSpec)
 }
 
