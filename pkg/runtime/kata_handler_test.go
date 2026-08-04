@@ -208,7 +208,7 @@ func TestPrepareKataEROFSRootfs(t *testing.T) {
 		return syscall.EINVAL
 	}
 
-	plan, err := prepareKataRootfs(bundlePath, rootfsImage, kataRootfsEROFS)
+	plan, err := prepareKataRootfs(bundlePath, rootfsImage, kataRootfsEROFS, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

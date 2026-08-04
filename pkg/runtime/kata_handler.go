@@ -131,7 +131,7 @@ func (k *KataHandler) Start(ctx context.Context, startConfig StartConfig) error 
 	if err != nil {
 		return fmt.Errorf("prepare Kata mounts: %w", err)
 	}
-	bundlePath, _, err = k.ociLoader.GenerateOci(OciLoadOptions{
+	bundlePath, ociSpec, err := k.ociLoader.GenerateOci(OciLoadOptions{
 		SandboxID:  startConfig.ID,
 		Config:     kataConfig,
 		CgroupPath: startConfig.CgroupPath,
@@ -147,6 +147,7 @@ func (k *KataHandler) Start(ctx context.Context, startConfig StartConfig) error 
 		bundlePath,
 		kataConfig.Rootfs,
 		rootfsKind,
+		ociSpec.Mounts,
 	)
 	if err != nil {
 		return errors.Join(

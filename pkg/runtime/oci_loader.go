@@ -276,29 +276,7 @@ func createRootfsPlaceholder(root string, mounts []Mount) error {
 		}
 	}
 
-	for _, mount := range mounts {
-		target, ok := placeholderMountTarget(root, mount.Destination)
-		if !ok {
-			continue
-		}
-		if mountSourceIsRegularFile(mount) {
-			if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
-				return fmt.Errorf("create placeholder parent for mount %q: %w", mount.Destination, err)
-			}
-			f, err := os.OpenFile(target, os.O_CREATE|os.O_RDONLY, 0644)
-			if err != nil {
-				return fmt.Errorf("create placeholder file for mount %q: %w", mount.Destination, err)
-			}
-			if err := f.Close(); err != nil {
-				return fmt.Errorf("close placeholder file for mount %q: %w", mount.Destination, err)
-			}
-			continue
-		}
-		if err := os.MkdirAll(target, 0755); err != nil {
-			return fmt.Errorf("create placeholder dir for mount %q: %w", mount.Destination, err)
-		}
-	}
-	return nil
+	return createRootfsMountTargets(root, mounts)
 }
 
 func placeholderMountTarget(root, destination string) (string, bool) {

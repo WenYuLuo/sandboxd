@@ -106,11 +106,21 @@ func (r *RunscHandler) Start(ctx context.Context, config StartConfig) error {
 	if err != nil {
 		return fmt.Errorf("generate OCI bundle: %w", err)
 	}
+	mountTargetsReady, err := rootfsMountTargetsReady(bundlePath, ociSpec)
+	if err != nil {
+		return fmt.Errorf("inspect rootfs mount targets: %w", err)
+	}
+	requiresHostWritableRootfs := config.SpecUpdates != nil &&
+		config.SpecUpdates.RequiresHostWritableRootfs
 	var cleanupNVProxyRootfs func() error
-	if config.SpecUpdates != nil && config.SpecUpdates.RequiresHostWritableRootfs {
-		cleanupNVProxyRootfs, err = prepareRunscNVProxyRootfs(bundlePath, ociSpec)
+	if requiresHostWritableRootfs || !mountTargetsReady {
+		cleanupNVProxyRootfs, err = prepareRunscPrivateRootfs(
+			bundlePath,
+			ociSpec,
+			requiresHostWritableRootfs,
+		)
 		if err != nil {
-			return fmt.Errorf("prepare writable nvproxy rootfs: %w", err)
+			return fmt.Errorf("prepare private runsc rootfs: %w", err)
 		}
 	}
 

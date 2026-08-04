@@ -103,25 +103,34 @@ func prepareKataRootfs(
 	bundlePath string,
 	source string,
 	kind kataRootfsKind,
+	mounts []Mount,
 ) (*kataRootfsPlan, error) {
 	switch kind {
 	case kataRootfsDirectory:
-		return prepareKataDirectoryRootfs(bundlePath, source)
+		return prepareKataDirectoryRootfs(bundlePath, source, mounts)
 	case kataRootfsEROFS:
-		return prepareKataEROFSRootfs(bundlePath, source)
+		return prepareKataEROFSRootfs(bundlePath, source, mounts)
 	default:
 		return nil, fmt.Errorf("unsupported Kata rootfs kind %d", kind)
 	}
 }
 
-func prepareKataDirectoryRootfs(bundlePath, lowerDir string) (*kataRootfsPlan, error) {
+func prepareKataDirectoryRootfs(
+	bundlePath string,
+	lowerDir string,
+	mounts []Mount,
+) (*kataRootfsPlan, error) {
 	if err := cleanupKataRootfs(bundlePath); err != nil {
 		return nil, fmt.Errorf("clean previous Kata rootfs: %w", err)
 	}
-	return prepareKataOverlayRootfs(bundlePath, lowerDir)
+	return prepareKataOverlayRootfs(bundlePath, lowerDir, mounts)
 }
 
-func prepareKataOverlayRootfs(bundlePath, lowerDir string) (*kataRootfsPlan, error) {
+func prepareKataOverlayRootfs(
+	bundlePath string,
+	lowerDir string,
+	mounts []Mount,
+) (*kataRootfsPlan, error) {
 	rootfsDir := filepath.Join(bundlePath, kataRootfsDir)
 	upperDir := filepath.Join(bundlePath, kataRootfsUpperDir)
 	workDir := filepath.Join(bundlePath, kataRootfsWorkDir)
@@ -132,6 +141,12 @@ func prepareKataOverlayRootfs(bundlePath, lowerDir string) (*kataRootfsPlan, err
 		if err := os.MkdirAll(path, 0755); err != nil {
 			return nil, err
 		}
+	}
+	if err := createRootfsMountTargets(upperDir, mounts); err != nil {
+		return nil, errors.Join(
+			fmt.Errorf("create Kata rootfs mount targets: %w", err),
+			cleanupKataRootfs(bundlePath),
+		)
 	}
 
 	if err := mountKataOverlay(lowerDir, upperDir, workDir, rootfsDir); err != nil {
@@ -152,7 +167,11 @@ func prepareKataOverlayRootfs(bundlePath, lowerDir string) (*kataRootfsPlan, err
 	}, nil
 }
 
-func prepareKataEROFSRootfs(bundlePath, source string) (*kataRootfsPlan, error) {
+func prepareKataEROFSRootfs(
+	bundlePath string,
+	source string,
+	mounts []Mount,
+) (*kataRootfsPlan, error) {
 	if err := cleanupKataRootfs(bundlePath); err != nil {
 		return nil, fmt.Errorf("clean previous Kata rootfs: %w", err)
 	}
@@ -160,7 +179,7 @@ func prepareKataEROFSRootfs(bundlePath, source string) (*kataRootfsPlan, error) 
 	if err := mountKataEROFSAt(source, lowerDir); err != nil {
 		return nil, err
 	}
-	plan, err := prepareKataOverlayRootfs(bundlePath, lowerDir)
+	plan, err := prepareKataOverlayRootfs(bundlePath, lowerDir, mounts)
 	if err != nil {
 		return nil, errors.Join(err, cleanupKataRootfs(bundlePath))
 	}

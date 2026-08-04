@@ -48,15 +48,25 @@ var unmountRunscNVProxyPath = func(target string, flags int) error {
 }
 
 // prepareRunscNVProxyRootfs gives gVisor's NVIDIA legacy hook a private,
-// host-writable view of the image-manager rootfs. The hook invokes
-// nvidia-container-cli before the sentry-side writable overlay exists, so it
-// cannot configure a shared read-only OCI mount directly.
+// host-writable view of the image-manager rootfs.
 func prepareRunscNVProxyRootfs(bundlePath string, spec *Spec) (func() error, error) {
+	return prepareRunscPrivateRootfs(bundlePath, spec, true)
+}
+
+// prepareRunscPrivateRootfs creates a per-sandbox overlay without modifying
+// the image-manager rootfs. A host-writable view is required by the NVIDIA
+// legacy hook; otherwise the original OCI readonly setting is preserved.
+func prepareRunscPrivateRootfs(
+	bundlePath string,
+	spec *Spec,
+	requireHostWritable bool,
+) (func() error, error) {
 	if spec == nil || spec.Root == nil || spec.Root.Path == "" {
-		return nil, errors.New("nvproxy requires a root filesystem")
+		return nil, errors.New("private runsc rootfs requires a root filesystem")
 	}
+	originalReadonly := spec.Root.Readonly
 	if err := cleanupRunscNVProxyRootfs(bundlePath); err != nil {
-		return nil, fmt.Errorf("clean previous nvproxy rootfs: %w", err)
+		return nil, fmt.Errorf("clean previous private runsc rootfs: %w", err)
 	}
 
 	lowerDir := spec.Root.Path
@@ -101,6 +111,12 @@ func prepareRunscNVProxyRootfs(bundlePath string, spec *Spec) (func() error, err
 			return nil, errors.Join(err, cleanupRunscNVProxyRootfs(bundlePath))
 		}
 	}
+	if err := createRootfsMountTargets(upperDir, spec.Mounts); err != nil {
+		return nil, errors.Join(
+			fmt.Errorf("create private runsc rootfs mount targets: %w", err),
+			cleanupRunscNVProxyRootfs(bundlePath),
+		)
+	}
 	// Seed the mount point in the private upper directory before mounting the
 	// overlay. The image-backed lower directory is untrusted and may contain
 	// symlinks at any component of this path. Creating the directory through
@@ -128,7 +144,7 @@ func prepareRunscNVProxyRootfs(bundlePath string, spec *Spec) (func() error, err
 	}
 
 	spec.Root.Path = runscNVProxyRootfsDir
-	spec.Root.Readonly = false
+	spec.Root.Readonly = originalReadonly && !requireHostWritable
 	if err := writeRunscNVProxySpec(filepath.Join(bundlePath, "config.json"), spec); err != nil {
 		return nil, errors.Join(err, cleanupRunscNVProxyRootfs(bundlePath))
 	}
