@@ -62,9 +62,11 @@ type networkaclProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type networkaclMapSpecs struct {
-	CONFIG_MAP *ebpf.MapSpec `ebpf:"CONFIG_MAP"`
-	POLICY_MAP *ebpf.MapSpec `ebpf:"POLICY_MAP"`
-	RULE_MAP   *ebpf.MapSpec `ebpf:"RULE_MAP"`
+	CONFIG_MAP     *ebpf.MapSpec `ebpf:"CONFIG_MAP"`
+	CONNECTION_MAP *ebpf.MapSpec `ebpf:"CONNECTION_MAP"`
+	FRAGMENT_MAP   *ebpf.MapSpec `ebpf:"FRAGMENT_MAP"`
+	POLICY_MAP     *ebpf.MapSpec `ebpf:"POLICY_MAP"`
+	RULE_MAP       *ebpf.MapSpec `ebpf:"RULE_MAP"`
 }
 
 // networkaclObjects contains all objects after they have been loaded into the kernel.
@@ -86,14 +88,18 @@ func (o *networkaclObjects) Close() error {
 //
 // It can be passed to loadNetworkaclObjects or ebpf.CollectionSpec.LoadAndAssign.
 type networkaclMaps struct {
-	CONFIG_MAP *ebpf.Map `ebpf:"CONFIG_MAP"`
-	POLICY_MAP *ebpf.Map `ebpf:"POLICY_MAP"`
-	RULE_MAP   *ebpf.Map `ebpf:"RULE_MAP"`
+	CONFIG_MAP     *ebpf.Map `ebpf:"CONFIG_MAP"`
+	CONNECTION_MAP *ebpf.Map `ebpf:"CONNECTION_MAP"`
+	FRAGMENT_MAP   *ebpf.Map `ebpf:"FRAGMENT_MAP"`
+	POLICY_MAP     *ebpf.Map `ebpf:"POLICY_MAP"`
+	RULE_MAP       *ebpf.Map `ebpf:"RULE_MAP"`
 }
 
 func (m *networkaclMaps) Close() error {
 	return _NetworkaclClose(
 		m.CONFIG_MAP,
+		m.CONNECTION_MAP,
+		m.FRAGMENT_MAP,
 		m.POLICY_MAP,
 		m.RULE_MAP,
 	)

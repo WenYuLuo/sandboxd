@@ -1,8 +1,9 @@
 # Per-sandbox network ACL
 
 Sandboxd can enforce an IPv4 packet policy and a DNS name policy for each
-sandbox. The feature is independent of the NAT backend and works with both
-`iptables` and `bpfnat`.
+sandbox. Packet ACL and NAT enforcement use the same selected backend:
+native netfilter for `iptables`, or TC eBPF for `bpfnat`. The managed DNS
+proxy is shared by both backends.
 
 This feature is disabled by default. Enable it on a drained node:
 
@@ -13,10 +14,11 @@ dns_proxy_concurrency_limit = 256
 dns_proxy_per_sandbox_concurrency_limit = 16
 ```
 
-Enabling it initializes the eBPF maps and a DNS proxy on `sandbox0:53`.
+Enabling it initializes the selected packet backend and a DNS proxy on
+`sandbox0:53`.
 Sandboxd manages every sandbox's `/etc/resolv.conf` so policies can be added
-later without restarting the sandbox. A sandbox with no policy has no ACL TC
-filters and its traffic remains unrestricted. `SetNetworkPolicy` can install a
+later without restarting the sandbox. A sandbox with no policy has no ACL
+hooks and its traffic remains unrestricted. `SetNetworkPolicy` can install a
 policy at any time after that sandbox reaches the running state.
 
 Do not enable the feature while the node has existing sandboxes. Their stored
@@ -26,16 +28,24 @@ configuration, and then start new sandboxes.
 
 ## Host requirements
 
-The host must provide:
+Both backends require an unused TCP and UDP port 53 on the `sandbox0` address
+and at least one usable `nameserver` in sandboxd's configured
+`resolv_conf_path` (or `/etc/resolv.conf` by default).
 
-- Linux with eBPF `SCHED_CLS`, hash/array maps, and TC `clsact` support;
+The `iptables` backend additionally requires:
+
+- the `ip_tables`, `br_netfilter`, and conntrack kernel facilities;
+- `net.bridge.bridge-nf-call-iptables=1` in sandboxd's network namespace; and
+- permission to manage filter chains and delete conntrack entries for policy
+  replacement, including the `connmark` match and `CONNMARK` target.
+
+The `bpfnat` backend instead requires:
+
+- Linux with eBPF `SCHED_CLS`, hash, LRU hash, and TC `clsact` support;
 - a writable, mounted bpffs at `/sys/fs/bpf`, or permission for sandboxd to
-  mount it there;
+  mount it there; and
 - permission for sandboxd to load BPF programs, pin maps, and manage TC
-  filters on its host veth devices;
-- an unused TCP and UDP port 53 on the `sandbox0` address; and
-- at least one usable `nameserver` in sandboxd's configured
-  `resolv_conf_path` (or `/etc/resolv.conf` by default).
+  filters on its host veth devices.
 
 The selected NAT backend keeps its own prerequisites. In particular, a
 `bpfnat` host setup must provide `net.ipv4.ip_forward=1` and, when local DNAT
@@ -61,6 +71,7 @@ SetNetworkPolicyRequest {
   network_policy: {
     traffic: {
       default_action: NETWORK_POLICY_ACTION_DENY
+      mode: TRAFFIC_POLICY_MODE_STATEFUL
       rules: {
         action: NETWORK_POLICY_ACTION_ALLOW
         direction: NETWORK_DIRECTION_BOTH
@@ -76,19 +87,30 @@ Sending no `network_policy` in `SetNetworkPolicyRequest` clears the current
 policy. It also removes the sandbox's ACL filters, returning it to the
 unrestricted fast path while preserving its registration for future updates.
 
-Traffic rules match an exact remote IPv4 address, direction, protocol, and
-optional port. Port zero means any port. A nonzero port is valid only for TCP
-or UDP. Use default `DENY` with `ALLOW` rules for an allowlist, or default
-`ALLOW` with `DENY` rules for a denylist. If multiple rules match, `DENY`
-wins. Rules are stateless: for a default-deny TCP or UDP policy, use direction
-`BOTH` when request and response traffic must both pass.
+Traffic rules match direction and protocol plus optional remote-peer and
+sandbox-side endpoints. An omitted `peer` matches any remote address and
+port; an explicitly supplied `0.0.0.0` remains an exact address. `peer.port`
+is the remote port. `sandbox_port` is the destination port on ingress and the
+source port on egress. Port zero means any port, and nonzero ports are valid
+only for TCP or UDP. This lets a default-deny policy publish a sandbox target
+port without knowing which frontend or client address will connect to it.
+
+Use default `DENY` with `ALLOW` rules for an allowlist, or default `ALLOW`
+with `DENY` rules for a denylist. If multiple rules match, `DENY` wins.
+`TRAFFIC_POLICY_MODE_STATEFUL` admits reply traffic for an allowed TCP, UDP,
+or ICMP flow and the related ICMP errors required for diagnostics and path
+MTU discovery. `TRAFFIC_POLICY_MODE_STATELESS` evaluates every direction
+independently. An unspecified mode remains stateless for compatibility with
+existing callers.
 
 The current packet-policy scope is IPv4. IPv6 and other Ethernet protocols are
 dropped while either a traffic or DNS policy is active; this prevents an IPv6
-resolver from bypassing DNS enforcement. ARP remains allowed. IPv4 fragments
-and IPv4 packets with header options are dropped while either packet or DNS
-policy enforcement is active. v1 supports exact IP addresses, not CIDRs or
-port ranges.
+resolver from bypassing DNS enforcement. ARP remains allowed. IPv4 header
+options and fragments are supported. With bpfnat, the first fragment records
+the ACL and NAT decision and later fragments reuse it; an out-of-order fragment
+with no recorded first fragment is dropped. Native netfilter supplies the
+equivalent fragment and connection tracking in iptables mode. v1 supports
+exact IP addresses, not CIDRs or port ranges.
 
 ## DNS policy
 
@@ -131,15 +153,23 @@ DNS policy with a traffic policy when those paths must also be restricted.
 ## Lifecycle and recovery
 
 Policy state is persisted in sandboxd's store. Rules for a new generation are
-staged first, and one policy-map update switches the dataplane to that
-generation. Old rules are deleted after the switch.
+staged before the dataplane switches to it. Policy replacement invalidates
+existing connection state immediately, so packets from a flow admitted by an
+old generation cannot retain access under the new policy. The iptables backend
+uses fail-closed dispatcher chains, generation-scoped connmarks, and removes
+the sandbox's conntrack entries;
+bpfnat keys connection and fragment state by policy generation.
 
-The eBPF maps are pinned under `/sys/fs/bpf/sandboxd/networkacl`, and TC keeps
-program references across an unexpected sandboxd exit. On restart, sandboxd
-reopens the maps, reconciles each active sandbox with its current host veth,
-and replaces the filters. This avoids a fail-open window during recovery.
-Normal sandbox deletion removes its policy, rules, and filters. Once all
-sandboxes are gone, a normal sandboxd shutdown also removes the pinned maps.
+With bpfnat, eBPF maps are pinned under
+`/sys/fs/bpf/sandboxd/networkacl`, and TC keeps program references across an
+unexpected sandboxd exit. On restart, sandboxd reopens the maps, reconciles
+each active sandbox with its current host veth, and replaces the filters. The
+iptables backend rebuilds its per-sandbox chains from the same persisted
+policy before making them active. Both paths avoid a fail-open recovery
+window.
+Normal sandbox deletion removes its policy, rules, and hooks. Once all
+sandboxes are gone, normal sandboxd shutdown also removes the bpfnat pinned
+maps or the iptables chains owned by sandboxd.
 Failed cleanup remains persisted as orphan state so startup recovery can retry
 it. Sandboxd persists that orphan cleanup intent before changing policy maps,
 rules, or TC filters. Kernel cleanup is idempotent and targets only sandboxd's

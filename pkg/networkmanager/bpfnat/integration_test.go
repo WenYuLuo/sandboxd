@@ -144,6 +144,44 @@ func testIntegrationDataplane(t *testing.T, mode gcMode) {
 	require.NoError(t, err)
 	assert.True(t, bytes.Equal(nonIPv4, nonIPv4Out[:len(nonIPv4)]))
 	assert.Equal(t, 6, mappingCount(t, objects.SNATMappings))
+
+	// Native bpfnat translates the first fragment through the normal L4 path
+	// and replays its address-only translation for subsequent fragments.
+	snatFirst := makeUDPFragment(sandboxIP, remoteIP, 32000, 53, 91, 0, true)
+	_, snatFirstOut, err := objects.EgressProgram.Test(snatFirst)
+	require.NoError(t, err)
+	assert.Equal(t, nodeIP[:], snatFirstOut[26:30])
+	snatLater := makeUDPFragment(sandboxIP, remoteIP, 0, 0, 91, 1, false)
+	_, snatLaterOut, err := objects.EgressProgram.Test(snatLater)
+	require.NoError(t, err)
+	assert.Equal(t, nodeIP[:], snatLaterOut[26:30])
+
+	snatReplyFirst := makeUDPFragment(remoteIP, nodeIP, 53, 32000, 92, 0, true)
+	_, snatReplyFirstOut, err := objects.IngressProgram.Test(snatReplyFirst)
+	require.NoError(t, err)
+	assert.Equal(t, sandboxIP[:], snatReplyFirstOut[30:34])
+	snatReplyLater := makeUDPFragment(remoteIP, nodeIP, 0, 0, 92, 1, false)
+	_, snatReplyLaterOut, err := objects.IngressProgram.Test(snatReplyLater)
+	require.NoError(t, err)
+	assert.Equal(t, sandboxIP[:], snatReplyLaterOut[30:34])
+
+	dnatFragmentFirst := makeUDPFragment(remoteIP, nodeIP, 40001, 8080, 93, 0, true)
+	_, dnatFragmentFirstOut, err := objects.IngressProgram.Test(dnatFragmentFirst)
+	require.NoError(t, err)
+	assert.Equal(t, secondSandboxIP[:], dnatFragmentFirstOut[30:34])
+	dnatFragmentLater := makeUDPFragment(remoteIP, nodeIP, 0, 0, 93, 1, false)
+	_, dnatFragmentLaterOut, err := objects.IngressProgram.Test(dnatFragmentLater)
+	require.NoError(t, err)
+	assert.Equal(t, secondSandboxIP[:], dnatFragmentLaterOut[30:34])
+
+	dnatReplyFirst := makeUDPFragment(secondSandboxIP, remoteIP, 8081, 40001, 94, 0, true)
+	_, dnatReplyFirstOut, err := objects.EgressProgram.Test(dnatReplyFirst)
+	require.NoError(t, err)
+	assert.Equal(t, nodeIP[:], dnatReplyFirstOut[26:30])
+	dnatReplyLater := makeUDPFragment(secondSandboxIP, remoteIP, 0, 0, 94, 1, false)
+	_, dnatReplyLaterOut, err := objects.EgressProgram.Test(dnatReplyLater)
+	require.NoError(t, err)
+	assert.Equal(t, nodeIP[:], dnatReplyLaterOut[26:30])
 }
 
 func TestIntegrationBPFTimerExpiry(t *testing.T) {
@@ -318,7 +356,7 @@ func testIntegrationManagerLifecycle(
 		assert.Nil(t, manager.gcDone)
 	}
 	assert.Len(t, manager.attachments, 4)
-	for _, name := range []string{"SNAT_MAPPING_IPV4", "EGRESS_POLICY_MAP", "DNAT_RULES_MAP", "SNAT_CONFIG_MAP", "POD_PORT_MAP", "LOCAL_REDIRECT_MAP"} {
+	for _, name := range []string{"SNAT_MAPPING_IPV4", "EGRESS_POLICY_MAP", "DNAT_RULES_MAP", "SNAT_CONFIG_MAP", "POD_PORT_MAP", "LOCAL_REDIRECT_MAP", "NAT_FRAGMENT_MAP"} {
 		_, err := os.Stat(filepath.Join(manager.pinPath, name))
 		require.NoError(t, err)
 	}
@@ -376,7 +414,7 @@ func loadIntegrationObjects(t *testing.T, pins string, mode gcMode) bpfObjects {
 
 func cleanupIntegrationObjects(t *testing.T, objects *bpfObjects, pins string) {
 	t.Helper()
-	for _, m := range []*ebpf.Map{objects.SNATMappings, objects.EgressPolicies, objects.DNATRules, objects.SNATConfig, objects.HostPorts, objects.LocalRedirect} {
+	for _, m := range []*ebpf.Map{objects.SNATMappings, objects.EgressPolicies, objects.DNATRules, objects.SNATConfig, objects.HostPorts, objects.LocalRedirect, objects.Fragments} {
 		if m != nil {
 			require.NoError(t, m.Unpin())
 		}
@@ -495,6 +533,20 @@ func makeUDPPacket(source, destination [4]byte, sourcePort, destinationPort uint
 	binary.BigEndian.PutUint16(udp[0:2], sourcePort)
 	binary.BigEndian.PutUint16(udp[2:4], destinationPort)
 	binary.BigEndian.PutUint16(udp[4:6], testUDPHeaderSize)
+	return packet
+}
+
+func makeUDPFragment(source, destination [4]byte, sourcePort, destinationPort, id, offset uint16, more bool) []byte {
+	packet := makeUDPPacket(source, destination, sourcePort, destinationPort)
+	ip := packet[testEthernetHeaderSize : testEthernetHeaderSize+testIPv4HeaderSize]
+	binary.BigEndian.PutUint16(ip[4:6], id)
+	fragment := offset & 0x1fff
+	if more {
+		fragment |= 0x2000
+	}
+	binary.BigEndian.PutUint16(ip[6:8], fragment)
+	binary.BigEndian.PutUint16(ip[10:12], 0)
+	binary.BigEndian.PutUint16(ip[10:12], ipv4Checksum(ip))
 	return packet
 }
 

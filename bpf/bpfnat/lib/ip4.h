@@ -36,4 +36,9 @@ static __always_inline bool ipv4_has_l4_header(const struct iphdr *ip4)
     return !ipv4_is_not_first_fragment(ip4);
 }
 
+static __always_inline bool ipv4_more_fragments(const struct iphdr *ip4)
+{
+    return ip4->frag_off & bpf_htons(0x2000);
+}
+
 #endif

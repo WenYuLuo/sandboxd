@@ -17,6 +17,13 @@
 #define SNAT_CONFIG_MAP_SIZE 32
 #define POD_PORT_MAP_SIZE 256
 #define LOCAL_REDIRECT_MAP_SIZE 1
+#define NAT_FRAGMENT_MAP_SIZE 65536
+#define NAT_FRAGMENT_TIMEOUT_NS (30ULL * 1000000000ULL)
+
+#define NAT_FRAGMENT_SNAT_EGRESS 1
+#define NAT_FRAGMENT_SNAT_INGRESS 2
+#define NAT_FRAGMENT_DNAT_INGRESS 3
+#define NAT_FRAGMENT_DNAT_EGRESS 4
 
 #define EGRESS_STATIC_PREFIX (sizeof(__be32) * 8)
 #define EGRESS_PREFIX_LEN(PREFIX) (EGRESS_STATIC_PREFIX + (PREFIX))
@@ -149,6 +156,20 @@ struct dnat_rules_entry {
     __u16 dport;
 };
 
+struct nat_fragment_key {
+    __be32 saddr;
+    __be32 daddr;
+    __be16 id;
+    __u8 protocol;
+    __u8 stage;
+};
+
+struct nat_fragment_entry {
+    __be32 to_saddr;
+    __be32 to_daddr;
+    __u64 expires_at;
+};
+
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __type(key, struct ipv4_ct_tuple);
@@ -198,6 +219,76 @@ struct {
     __uint(pinning, LIBBPF_PIN_BY_NAME);
     __uint(max_entries, LOCAL_REDIRECT_MAP_SIZE);
 } LOCAL_REDIRECT_MAP SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __type(key, struct nat_fragment_key);
+    __type(value, struct nat_fragment_entry);
+    __uint(pinning, LIBBPF_PIN_BY_NAME);
+    __uint(max_entries, NAT_FRAGMENT_MAP_SIZE);
+} NAT_FRAGMENT_MAP SEC(".maps");
+
+static __always_inline struct nat_fragment_key nat_fragment_key(const struct iphdr *ip4, __u8 stage)
+{
+    struct nat_fragment_key key = {
+        .saddr = ip4->saddr,
+        .daddr = ip4->daddr,
+        .id = ip4->id,
+        .protocol = ip4->protocol,
+        .stage = stage,
+    };
+    return key;
+}
+
+static __always_inline void remember_nat_fragment(const struct nat_fragment_key *key,
+                                                  bool more_fragments, __be32 to_saddr,
+                                                  __be32 to_daddr)
+{
+    struct nat_fragment_entry entry;
+
+    if (!more_fragments)
+        return;
+    entry.to_saddr = to_saddr;
+    entry.to_daddr = to_daddr;
+    entry.expires_at = bpf_ktime_get_ns() + NAT_FRAGMENT_TIMEOUT_NS;
+    bpf_map_update_elem(&NAT_FRAGMENT_MAP, key, &entry, BPF_ANY);
+}
+
+/*
+ * Later fragments contain no transport header. Reapply only the address
+ * translation recorded by the first fragment and update the IPv4 checksum.
+ */
+static __always_inline int rewrite_nat_fragment(struct __sk_buff *skb,
+                                                const struct nat_fragment_key *key,
+                                                const struct iphdr *ip4)
+{
+    struct nat_fragment_entry *entry = bpf_map_lookup_elem(&NAT_FRAGMENT_MAP, key);
+    __be32 old_saddr = ip4->saddr;
+    __be32 old_daddr = ip4->daddr;
+    __u64 diff = 0;
+
+    if (!entry)
+        return 0;
+    if (entry->expires_at < bpf_ktime_get_ns()) {
+        bpf_map_delete_elem(&NAT_FRAGMENT_MAP, key);
+        return 0;
+    }
+    if (entry->to_saddr != old_saddr) {
+        diff = bpf_csum_diff(&old_saddr, 4, &entry->to_saddr, 4, diff);
+        if (bpf_skb_store_bytes(skb, ETH_HLEN + offsetof(struct iphdr, saddr), &entry->to_saddr, 4,
+                                0) < 0)
+            return DROP_WRITE_ERROR;
+    }
+    if (entry->to_daddr != old_daddr) {
+        diff = bpf_csum_diff(&old_daddr, 4, &entry->to_daddr, 4, diff);
+        if (bpf_skb_store_bytes(skb, ETH_HLEN + offsetof(struct iphdr, daddr), &entry->to_daddr, 4,
+                                0) < 0)
+            return DROP_WRITE_ERROR;
+    }
+    if (diff && ipv4_csum_update_by_diff(skb, ETH_HLEN, diff) < 0)
+        return DROP_CSUM_L3;
+    return 1;
+}
 
 static __always_inline int l4_modify_port(struct __sk_buff *skb, int l4_off, int port_off,
                                           struct csum_offset *csum_off, __be16 port,
@@ -816,6 +907,8 @@ static __always_inline int snat_v4_nat(struct __sk_buff *skb, const struct ipv4_
     struct iphdr *ip4;
     union tcp_flags tcp_flags = {.value = 0};
     enum ct_action action = ACTION_UNSPEC;
+    struct nat_fragment_key fragment;
+    bool more_fragments;
 
     struct {
         __be16 sport;
@@ -827,6 +920,13 @@ static __always_inline int snat_v4_nat(struct __sk_buff *skb, const struct ipv4_
 
     if (!revalidate_data(skb, &data, &data_end, &ip4))
         return DROP_INVALID;
+
+    fragment = nat_fragment_key(ip4, NAT_FRAGMENT_SNAT_EGRESS);
+    more_fragments = ipv4_more_fragments(ip4);
+    if (ipv4_is_not_first_fragment(ip4)) {
+        ret = rewrite_nat_fragment(skb, &fragment, ip4);
+        return ret == 1 ? 0 : (ret < 0 ? ret : DROP_NAT_NO_MAPPING);
+    }
 
     /* prepare ct tuple for EGRESS */
     snat_v4_init_tuple(ip4, NAT_DIR_EGRESS, &tuple);
@@ -877,6 +977,8 @@ static __always_inline int snat_v4_nat(struct __sk_buff *skb, const struct ipv4_
 
     /* modify saddr to new saddr given by snat target */
     ret = snat_v4_rewrite_egress(skb, &tuple, state, off, ipv4_has_l4_header(ip4));
+    if (ret >= 0)
+        remember_nat_fragment(&fragment, more_fragments, state->to_saddr, tuple.daddr);
 
 ret_val:
     return ret;
@@ -969,6 +1071,8 @@ static __always_inline int snat_v4_rev_nat(struct __sk_buff *skb,
     struct ipv4_ct_tuple otuple = {};
     union tcp_flags tcp_flags = {.value = 0};
     enum ct_action action = ACTION_UNSPEC;
+    struct nat_fragment_key fragment;
+    bool more_fragments;
     void *data, *data_end;
     struct iphdr *ip4;
     struct {
@@ -981,6 +1085,13 @@ static __always_inline int snat_v4_rev_nat(struct __sk_buff *skb,
     if (!revalidate_data(skb, &data, &data_end, &ip4)) {
         ret = DROP_INVALID;
         goto ret_val;
+    }
+
+    fragment = nat_fragment_key(ip4, NAT_FRAGMENT_SNAT_INGRESS);
+    more_fragments = ipv4_more_fragments(ip4);
+    if (ipv4_is_not_first_fragment(ip4)) {
+        ret = rewrite_nat_fragment(skb, &fragment, ip4);
+        return ret < 0 ? ret : 0;
     }
 
     /* prepare ct tuple for INGRESS as snat key */
@@ -1042,6 +1153,8 @@ static __always_inline int snat_v4_rev_nat(struct __sk_buff *skb,
         goto ret_val;
 
     ret = snat_v4_rewrite_ingress(skb, &tuple, state, off);
+    if (ret >= 0)
+        remember_nat_fragment(&fragment, more_fragments, tuple.saddr, state->to_daddr);
 
 ret_val:
     return ret;
@@ -1056,6 +1169,8 @@ static __always_inline int dnat_v4_nat(struct __sk_buff *skb)
     struct iphdr *ip4;
     union tcp_flags tcp_flags = {.value = 0};
     enum ct_action action = ACTION_UNSPEC;
+    struct nat_fragment_key fragment;
+    bool more_fragments;
 
     struct {
         __be16 sport;
@@ -1066,6 +1181,13 @@ static __always_inline int dnat_v4_nat(struct __sk_buff *skb)
 
     if (!revalidate_data(skb, &data, &data_end, &ip4))
         return false;
+
+    fragment = nat_fragment_key(ip4, NAT_FRAGMENT_DNAT_INGRESS);
+    more_fragments = ipv4_more_fragments(ip4);
+    if (ipv4_is_not_first_fragment(ip4)) {
+        ret = rewrite_nat_fragment(skb, &fragment, ip4);
+        return ret < 0 ? ret : (ret == 1 ? 1 : 0);
+    }
 
     /* prepare ct tuple for INGRESS as snat key */
     snat_v4_init_tuple(ip4, NAT_DIR_INGRESS, &tuple);
@@ -1130,6 +1252,8 @@ static __always_inline int dnat_v4_nat(struct __sk_buff *skb)
 
     /* modify daddr to new daddr given by DNAT target */
     ret = snat_v4_rewrite_ingress(skb, &tuple, state, off);
+    if (ret >= 0)
+        remember_nat_fragment(&fragment, more_fragments, tuple.saddr, state->to_daddr);
 
 ret_val:
 #ifdef BPFNAT_AUDIT
@@ -1146,6 +1270,8 @@ static __always_inline int dnat_v4_rev_nat(struct __sk_buff *skb)
     struct ipv4_ct_tuple otuple = {};
     union tcp_flags tcp_flags = {.value = 0};
     enum ct_action action = ACTION_UNSPEC;
+    struct nat_fragment_key fragment;
+    bool more_fragments;
     void *data, *data_end;
     struct iphdr *ip4;
     struct {
@@ -1158,6 +1284,13 @@ static __always_inline int dnat_v4_rev_nat(struct __sk_buff *skb)
     if (!revalidate_data(skb, &data, &data_end, &ip4)) {
         ret = DROP_INVALID;
         goto ret_val;
+    }
+
+    fragment = nat_fragment_key(ip4, NAT_FRAGMENT_DNAT_EGRESS);
+    more_fragments = ipv4_more_fragments(ip4);
+    if (ipv4_is_not_first_fragment(ip4)) {
+        ret = rewrite_nat_fragment(skb, &fragment, ip4);
+        return ret < 0 ? ret : 0;
     }
 
     /* prepare ct tuple for EGRESS as snat key */
@@ -1219,6 +1352,8 @@ static __always_inline int dnat_v4_rev_nat(struct __sk_buff *skb)
         goto ret_val;
 
     ret = snat_v4_rewrite_egress(skb, &tuple, state, off, ipv4_has_l4_header(ip4));
+    if (ret >= 0)
+        remember_nat_fragment(&fragment, more_fragments, state->to_saddr, tuple.daddr);
 
 ret_val:
     return ret;

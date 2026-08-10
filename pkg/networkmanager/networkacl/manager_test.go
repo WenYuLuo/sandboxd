@@ -15,6 +15,7 @@
 package networkacl
 
 import (
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"testing"
@@ -23,6 +24,12 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestBPFKeyLayoutsRemainStable(t *testing.T) {
+	assert.Equal(t, 24, binary.Size(ruleKey{}))
+	assert.Equal(t, 24, binary.Size(connectionKey{}))
+	assert.Equal(t, 24, binary.Size(fragmentKey{}))
+}
 
 func TestReconcilePersistsCleanupIntentBeforeKernelMutation(t *testing.T) {
 	stateStore := &failNthStore{MockStore: store.NewMockStore()}

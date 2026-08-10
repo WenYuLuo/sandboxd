@@ -164,7 +164,7 @@ type NetworkConfig struct {
 	IPRange string `toml:"ip_range" json:"ipRange"`
 
 	// NatBackend selects the registered NAT implementation used for SNAT/DNAT
-	// rules. Empty defaults to "iptables", the only backend in v0.1.0.
+	// rules. Empty defaults to "iptables" for backward compatibility.
 	NatBackend string `toml:"nat_backend" json:"natBackend"`
 
 	// EnableLocalDNAT forwards connections made to local addresses in

@@ -67,6 +67,7 @@ type bpfnat_timerMapSpecs struct {
 	DNAT_RULES_MAP     *ebpf.MapSpec `ebpf:"DNAT_RULES_MAP"`
 	EGRESS_POLICY_MAP  *ebpf.MapSpec `ebpf:"EGRESS_POLICY_MAP"`
 	LOCAL_REDIRECT_MAP *ebpf.MapSpec `ebpf:"LOCAL_REDIRECT_MAP"`
+	NAT_FRAGMENT_MAP   *ebpf.MapSpec `ebpf:"NAT_FRAGMENT_MAP"`
 	POD_PORT_MAP       *ebpf.MapSpec `ebpf:"POD_PORT_MAP"`
 	SNAT_CONFIG_MAP    *ebpf.MapSpec `ebpf:"SNAT_CONFIG_MAP"`
 	SNAT_MAPPING_IPV4  *ebpf.MapSpec `ebpf:"SNAT_MAPPING_IPV4"`
@@ -94,6 +95,7 @@ type bpfnat_timerMaps struct {
 	DNAT_RULES_MAP     *ebpf.Map `ebpf:"DNAT_RULES_MAP"`
 	EGRESS_POLICY_MAP  *ebpf.Map `ebpf:"EGRESS_POLICY_MAP"`
 	LOCAL_REDIRECT_MAP *ebpf.Map `ebpf:"LOCAL_REDIRECT_MAP"`
+	NAT_FRAGMENT_MAP   *ebpf.Map `ebpf:"NAT_FRAGMENT_MAP"`
 	POD_PORT_MAP       *ebpf.Map `ebpf:"POD_PORT_MAP"`
 	SNAT_CONFIG_MAP    *ebpf.Map `ebpf:"SNAT_CONFIG_MAP"`
 	SNAT_MAPPING_IPV4  *ebpf.Map `ebpf:"SNAT_MAPPING_IPV4"`
@@ -104,6 +106,7 @@ func (m *bpfnat_timerMaps) Close() error {
 		m.DNAT_RULES_MAP,
 		m.EGRESS_POLICY_MAP,
 		m.LOCAL_REDIRECT_MAP,
+		m.NAT_FRAGMENT_MAP,
 		m.POD_PORT_MAP,
 		m.SNAT_CONFIG_MAP,
 		m.SNAT_MAPPING_IPV4,
