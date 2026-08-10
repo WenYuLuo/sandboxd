@@ -70,12 +70,37 @@ func TestNormalizeTrafficPolicy(t *testing.T) {
 	assert.Equal(t, uint8(6), policy.Traffic.Rules[0].Protocol)
 }
 
+func TestNormalizeStatefulSandboxPortWithAnyPeer(t *testing.T) {
+	policy, err := NormalizePolicy(&runtime.NetworkPolicy{Traffic: &runtime.TrafficPolicy{
+		DefaultAction: runtime.NetworkPolicyAction_NETWORK_POLICY_ACTION_DENY,
+		Mode:          runtime.TrafficPolicyMode_TRAFFIC_POLICY_MODE_STATEFUL,
+		Rules: []*runtime.TrafficRule{{
+			Action:      runtime.NetworkPolicyAction_NETWORK_POLICY_ACTION_ALLOW,
+			Direction:   runtime.NetworkDirection_NETWORK_DIRECTION_INGRESS,
+			Protocol:    runtime.NetworkProtocol_NETWORK_PROTOCOL_TCP,
+			SandboxPort: 50090,
+		}},
+	}})
+	require.NoError(t, err)
+	require.Len(t, policy.Traffic.Rules, 1)
+	assert.Equal(t, policyModeStateful, policy.Traffic.Mode)
+	assert.True(t, policy.Traffic.Rules[0].PeerAny)
+	assert.Equal(t, uint16(50090), policy.Traffic.Rules[0].SandboxPort)
+}
+
 func TestNormalizePolicyRejectsInvalidInput(t *testing.T) {
 	tests := []struct {
 		name   string
 		policy *runtime.NetworkPolicy
 	}{
 		{name: "unspecified default", policy: &runtime.NetworkPolicy{Traffic: &runtime.TrafficPolicy{}}},
+		{name: "sandbox port with ICMP", policy: &runtime.NetworkPolicy{Traffic: &runtime.TrafficPolicy{
+			DefaultAction: runtime.NetworkPolicyAction_NETWORK_POLICY_ACTION_ALLOW,
+			Rules: []*runtime.TrafficRule{{
+				Action: runtime.NetworkPolicyAction_NETWORK_POLICY_ACTION_DENY, Direction: runtime.NetworkDirection_NETWORK_DIRECTION_INGRESS,
+				Protocol: runtime.NetworkProtocol_NETWORK_PROTOCOL_ICMP, SandboxPort: 80,
+			}},
+		}}},
 		{name: "IPv6", policy: &runtime.NetworkPolicy{Traffic: &runtime.TrafficPolicy{
 			DefaultAction: runtime.NetworkPolicyAction_NETWORK_POLICY_ACTION_ALLOW,
 			Rules: []*runtime.TrafficRule{{

@@ -92,6 +92,7 @@ type bpfObjects struct {
 	SNATConfig     *ebpf.Map     `ebpf:"SNAT_CONFIG_MAP"`
 	HostPorts      *ebpf.Map     `ebpf:"POD_PORT_MAP"`
 	LocalRedirect  *ebpf.Map     `ebpf:"LOCAL_REDIRECT_MAP"`
+	Fragments      *ebpf.Map     `ebpf:"NAT_FRAGMENT_MAP"`
 }
 
 func (o *bpfObjects) close() error {
@@ -106,6 +107,7 @@ func (o *bpfObjects) close() error {
 		closeMap(o.SNATConfig),
 		closeMap(o.HostPorts),
 		closeMap(o.LocalRedirect),
+		closeMap(o.Fragments),
 	)
 }
 
@@ -953,6 +955,7 @@ func (m *Manager) unpinMapsLocked() error {
 		m.objects.SNATConfig,
 		m.objects.HostPorts,
 		m.objects.LocalRedirect,
+		m.objects.Fragments,
 	} {
 		if pinnedMap != nil {
 			if err := pinnedMap.Unpin(); err != nil && !errors.Is(err, os.ErrNotExist) {

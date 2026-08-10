@@ -38,6 +38,7 @@ const (
 )
 
 type Config struct {
+	Backend                            string
 	BridgeIP                           net.IP
 	ResolverPath                       string
 	Store                              store.DbStore
@@ -71,12 +72,15 @@ type bpfObjects struct {
 	IngressProgram *ebpf.Program `ebpf:"sandboxd_acl_ingress"`
 	Policies       *ebpf.Map     `ebpf:"POLICY_MAP"`
 	Rules          *ebpf.Map     `ebpf:"RULE_MAP"`
+	Connections    *ebpf.Map     `ebpf:"CONNECTION_MAP"`
+	Fragments      *ebpf.Map     `ebpf:"FRAGMENT_MAP"`
 	Config         *ebpf.Map     `ebpf:"CONFIG_MAP"`
 }
 
 func (o *bpfObjects) close() error {
 	return errors.Join(closeProgram(o.EgressProgram), closeProgram(o.IngressProgram),
-		closeMap(o.Policies), closeMap(o.Rules), closeMap(o.Config))
+		closeMap(o.Policies), closeMap(o.Rules), closeMap(o.Connections),
+		closeMap(o.Fragments), closeMap(o.Config))
 }
 
 func closeProgram(program *ebpf.Program) error {
@@ -99,18 +103,45 @@ type policyValue struct {
 	TrafficEnabled uint8
 	TrafficDefault uint8
 	DNSEnabled     uint8
-	Reserved       uint8
+	Mode           uint8
 }
 
 type ruleKey struct {
-	Generation uint64
-	IfIndex    uint32
-	PeerIP     uint32
-	PeerPort   uint16
-	Direction  uint8
-	Protocol   uint8
-	Reserved   uint32
+	Generation  uint64
+	IfIndex     uint32
+	PeerIP      uint32
+	PeerPort    uint16
+	Direction   uint8
+	Protocol    uint8
+	SandboxPort uint16
+	MatchFlags  uint8
+	Reserved    uint8
 }
+
+type connectionKey struct {
+	Generation  uint64
+	IfIndex     uint32
+	PeerIP      uint32
+	PeerPort    uint16
+	SandboxPort uint16
+	Protocol    uint8
+	Reserved    [3]uint8
+}
+
+type fragmentKey struct {
+	Generation     uint64
+	IfIndex        uint32
+	SourceIP       uint32
+	DestinationIP  uint32
+	Identification uint16
+	Protocol       uint8
+	Direction      uint8
+}
+
+const (
+	ruleMatchPeerAny uint8 = 0x01
+	ruleMatchValid   uint8 = 0x80
+)
 
 type Manager struct {
 	mu sync.RWMutex
@@ -122,6 +153,7 @@ type Manager struct {
 	sourceIndex   map[string]string
 	ownedQdiscs   map[int]struct{}
 	dns           *dnsProxy
+	iptables      *iptablesBackend
 	disableAttach bool
 }
 
@@ -141,13 +173,31 @@ func New(config Config) (*Manager, error) {
 	if err := manager.loadState(); err != nil {
 		return nil, err
 	}
-	if err := manager.loadBPF(); err != nil {
-		return nil, err
+	backend := config.Backend
+	if backend == "" {
+		backend = aclBackendBPFNAT
+	}
+	switch backend {
+	case aclBackendIPTables:
+		iptablesBackend, backendErr := newIPTablesBackend(bridgeIP)
+		if backendErr != nil {
+			return nil, backendErr
+		}
+		manager.iptables = iptablesBackend
+	case aclBackendBPFNAT:
+		if err := manager.loadBPF(); err != nil {
+			return nil, err
+		}
+	default:
+		return nil, fmt.Errorf("unsupported network ACL backend %q", backend)
 	}
 	failed := true
 	defer func() {
 		if failed {
 			_ = manager.objects.close()
+			if manager.iptables != nil && len(manager.entries) == 0 {
+				_ = manager.iptables.close()
+			}
 		}
 	}()
 	if !config.DisableProxy {
@@ -177,7 +227,7 @@ func New(config Config) (*Manager, error) {
 		)
 	}
 	failed = false
-	logrus.Infof("network ACL initialized, bridge=%s pins=%s", bridgeIP, pinRoot)
+	logrus.Infof("network ACL initialized, backend=%s bridge=%s", backend, bridgeIP)
 	return manager, nil
 }
 
@@ -261,6 +311,7 @@ func (m *Manager) Restore(active map[string]Binding) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	resolved := make(map[string]persistedEntry, len(active))
+	entryRestoreOld := make(map[string]persistedEntry, len(active))
 	for sandboxID, binding := range active {
 		entry, ok := m.entries[sandboxID]
 		if !ok {
@@ -270,10 +321,20 @@ func (m *Manager) Restore(active map[string]Binding) error {
 		if err != nil {
 			return fmt.Errorf("restore network ACL for %s: find host veth %s: %w", sandboxID, binding.HostVeth, err)
 		}
+		oldEntry := entry
 		entry.IP = binding.IP.String()
 		entry.HostVeth = binding.HostVeth
 		entry.IfIndex = link.Attrs().Index
 		entry.Orphaned = false
+		if m.iptables != nil && !entry.Policy.Empty() {
+			entry.Generation++
+			if entry.Generation == 0 {
+				entry.Generation = 1
+			}
+		} else {
+			oldEntry = entry
+		}
+		entryRestoreOld[sandboxID] = oldEntry
 		resolved[sandboxID] = entry
 		// Publish the resolved ownership before reconciling inactive entries.
 		// cleanupEntryLocked uses this to refuse destructive cleanup when stale
@@ -297,7 +358,7 @@ func (m *Manager) Restore(active map[string]Binding) error {
 
 	for sandboxID, entry := range resolved {
 		m.entries[sandboxID] = entry
-		if err := m.applyLocked(entry, entry); err != nil {
+		if err := m.applyLocked(entryRestoreOld[sandboxID], entry); err != nil {
 			return errors.Join(
 				fmt.Errorf("restore network ACL for %s: %w", sandboxID, err),
 				m.persistLocked(),
@@ -490,15 +551,22 @@ func (m *Manager) cleanupEntryLocked(sandboxID string, entry persistedEntry) err
 			otherID,
 		)
 	}
+	if m.iptables != nil {
+		return m.iptables.cleanup(entry)
+	}
 
 	return errors.Join(
 		m.removePolicyMapLocked(entry.IfIndex),
 		m.detachLocked(entry),
 		m.deleteRulesLocked(entry.IfIndex, 0),
+		m.deleteDynamicStateLocked(entry.IfIndex, 0),
 	)
 }
 
 func (m *Manager) applyLocked(old, next persistedEntry) error {
+	if m.iptables != nil {
+		return m.iptables.apply(old, next)
+	}
 	if next.Policy.Empty() {
 		if old.IfIndex == 0 {
 			return nil
@@ -511,6 +579,9 @@ func (m *Manager) applyLocked(old, next persistedEntry) error {
 		}
 		if err := m.deleteRulesLocked(old.IfIndex, 0); err != nil {
 			logrus.Warnf("delete cleared network ACL rules from %s: %v", old.HostVeth, err)
+		}
+		if err := m.deleteDynamicStateLocked(old.IfIndex, 0); err != nil {
+			logrus.Warnf("delete cleared network ACL state from %s: %v", old.HostVeth, err)
 		}
 		return nil
 	}
@@ -528,6 +599,7 @@ func (m *Manager) applyLocked(old, next persistedEntry) error {
 	if next.Policy.Traffic != nil {
 		value.TrafficEnabled = 1
 		value.TrafficDefault = next.Policy.Traffic.DefaultAction
+		value.Mode = next.Policy.Traffic.Mode
 	}
 	if next.Policy.DNS != nil {
 		value.DNSEnabled = 1
@@ -544,6 +616,9 @@ func (m *Manager) applyLocked(old, next persistedEntry) error {
 		if err := m.deleteRulesLocked(old.IfIndex, old.Generation); err != nil {
 			logrus.Warnf("delete old network ACL generation %d for %s: %v", old.Generation, next.IP, err)
 		}
+		if err := m.deleteDynamicStateLocked(old.IfIndex, old.Generation); err != nil {
+			logrus.Warnf("delete old network ACL state generation %d for %s: %v", old.Generation, next.IP, err)
+		}
 	}
 	return nil
 }
@@ -554,13 +629,19 @@ func (m *Manager) writeRulesLocked(entry persistedEntry) error {
 	}
 	for _, rule := range entry.Policy.Traffic.Rules {
 		for _, direction := range rule.Directions {
+			matchFlags := ruleMatchValid
+			if rule.PeerAny {
+				matchFlags |= ruleMatchPeerAny
+			}
 			key := ruleKey{
-				Generation: entry.Generation,
-				IfIndex:    uint32(entry.IfIndex),
-				PeerIP:     ipv4Value(net.IP(rule.PeerIP[:])),
-				PeerPort:   networkPort(rule.PeerPort),
-				Direction:  direction,
-				Protocol:   rule.Protocol,
+				Generation:  entry.Generation,
+				IfIndex:     uint32(entry.IfIndex),
+				PeerIP:      ipv4Value(net.IP(rule.PeerIP[:])),
+				PeerPort:    networkPort(rule.PeerPort),
+				Direction:   direction,
+				Protocol:    rule.Protocol,
+				SandboxPort: networkPort(rule.SandboxPort),
+				MatchFlags:  matchFlags,
 			}
 			value := rule.Action
 			var existing uint8
@@ -600,6 +681,43 @@ func (m *Manager) deleteRulesLocked(ifindex int, generation uint64) error {
 		}
 	}
 	if err := iterator.Err(); err != nil {
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
+}
+
+func (m *Manager) deleteDynamicStateLocked(ifindex int, generation uint64) error {
+	if ifindex == 0 {
+		return nil
+	}
+	var errs []error
+	connections := m.objects.Connections.Iterate()
+	var connection connectionKey
+	var expires uint64
+	for connections.Next(&connection, &expires) {
+		if connection.IfIndex != uint32(ifindex) || (generation != 0 && connection.Generation != generation) {
+			continue
+		}
+		candidate := connection
+		if err := m.objects.Connections.Delete(&candidate); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+			errs = append(errs, err)
+		}
+	}
+	if err := connections.Err(); err != nil {
+		errs = append(errs, err)
+	}
+	fragments := m.objects.Fragments.Iterate()
+	var fragment fragmentKey
+	for fragments.Next(&fragment, &expires) {
+		if fragment.IfIndex != uint32(ifindex) || (generation != 0 && fragment.Generation != generation) {
+			continue
+		}
+		candidate := fragment
+		if err := m.objects.Fragments.Delete(&candidate); err != nil && !errors.Is(err, ebpf.ErrKeyNotExist) {
+			errs = append(errs, err)
+		}
+	}
+	if err := fragments.Err(); err != nil {
 		errs = append(errs, err)
 	}
 	return errors.Join(errs...)
@@ -794,13 +912,20 @@ func (m *Manager) Close() error {
 	// a running sandbox must remain fail-closed until the next daemon restores
 	// and reconciles its policy.
 	if len(m.entries) == 0 {
-		for _, name := range []string{"POLICY_MAP", "RULE_MAP", "CONFIG_MAP"} {
+		for _, name := range []string{
+			"POLICY_MAP", "RULE_MAP", "CONNECTION_MAP", "FRAGMENT_MAP", "CONFIG_MAP",
+		} {
 			if err := os.Remove(filepath.Join(pinRoot, name)); err != nil && !os.IsNotExist(err) {
 				errs = append(errs, err)
 			}
 		}
 		if err := os.Remove(pinRoot); err != nil && !os.IsNotExist(err) {
 			errs = append(errs, err)
+		}
+		if m.iptables != nil {
+			if err := m.iptables.close(); err != nil {
+				errs = append(errs, err)
+			}
 		}
 	}
 	return errors.Join(errs...)

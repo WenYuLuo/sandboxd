@@ -96,6 +96,92 @@ func TestIntegrationDataplane(t *testing.T) {
 	assert.Equal(t, uint32(2), ret)
 }
 
+func TestIntegrationStatefulConnectionsAndFragments(t *testing.T) {
+	require.NoError(t, ensureBPFFS())
+	require.NoError(t, rlimit.RemoveMemlock())
+	spec, err := loadNetworkacl()
+	require.NoError(t, err)
+	pinPath, err := os.MkdirTemp("/sys/fs/bpf", "networkacl-stateful-test-")
+	require.NoError(t, err)
+	defer os.RemoveAll(pinPath)
+	var objects bpfObjects
+	require.NoError(t, spec.LoadAndAssign(&objects, &ebpf.CollectionOptions{
+		Maps: ebpf.MapOptions{PinPath: pinPath},
+	}))
+	defer objects.close()
+
+	sandboxIP := net.ParseIP("10.88.0.2").To4()
+	remoteIP := net.ParseIP("192.0.2.10").To4()
+	ifindex := uint32(1)
+	policy := policyValue{
+		Generation: 1, SandboxIP: ipv4Value(sandboxIP), TrafficEnabled: 1,
+		TrafficDefault: actionDeny, Mode: policyModeStateful,
+	}
+	require.NoError(t, objects.Policies.Update(&ifindex, &policy, ebpf.UpdateAny))
+	allowPublishedPort := ruleKey{
+		Generation: 1, IfIndex: ifindex, Direction: directionIngress, Protocol: 6,
+		SandboxPort: networkPort(50090), MatchFlags: ruleMatchValid | ruleMatchPeerAny,
+	}
+	allow := actionAllow
+	require.NoError(t, objects.Rules.Update(&allowPublishedPort, &allow, ebpf.UpdateAny))
+	allowOutbound := ruleKey{
+		Generation: 1, IfIndex: ifindex, PeerIP: ipv4Value(remoteIP),
+		PeerPort: networkPort(443), Direction: directionEgress, Protocol: 6,
+		MatchFlags: ruleMatchValid,
+	}
+	require.NoError(t, objects.Rules.Update(&allowOutbound, &allow, ebpf.UpdateAny))
+
+	syn := makeTCPPacketWithFlags(remoteIP, sandboxIP, 32000, 50090, 0x02)
+	ret, _, err := objects.IngressProgram.Test(syn)
+	require.NoError(t, err)
+	assert.Equal(t, uint32(0), ret)
+	synACK := makeTCPPacketWithFlags(sandboxIP, remoteIP, 50090, 32000, 0x12)
+	ret, _, err = objects.EgressProgram.Test(synACK)
+	require.NoError(t, err)
+	assert.Equal(t, uint32(0), ret, "state permits the reverse leg")
+
+	unrelated := makeTCPPacketWithFlags(sandboxIP, remoteIP, 50091, 32000, 0x12)
+	ret, _, err = objects.EgressProgram.Test(unrelated)
+	require.NoError(t, err)
+	assert.Equal(t, uint32(2), ret)
+
+	outboundSYN := makeTCPPacketWithFlags(sandboxIP, remoteIP, 50091, 443, 0x02)
+	ret, _, err = objects.EgressProgram.Test(outboundSYN)
+	require.NoError(t, err)
+	assert.Equal(t, uint32(0), ret)
+	pathMTU := makeICMPError(remoteIP, sandboxIP, 3, 4, outboundSYN)
+	ret, _, err = objects.IngressProgram.Test(pathMTU)
+	require.NoError(t, err)
+	assert.Equal(t, uint32(0), ret, "related ICMP accepts the minimum quoted TCP header")
+
+	policy.Generation = 2
+	require.NoError(t, objects.Policies.Update(&ifindex, &policy, ebpf.UpdateAny))
+	ret, _, err = objects.EgressProgram.Test(synACK)
+	require.NoError(t, err)
+	assert.Equal(t, uint32(2), ret, "a policy generation change invalidates old state")
+
+	policy.Generation = 3
+	require.NoError(t, objects.Policies.Update(&ifindex, &policy, ebpf.UpdateAny))
+	allowUDP := ruleKey{
+		Generation: 3, IfIndex: ifindex, PeerIP: ipv4Value(remoteIP),
+		PeerPort: networkPort(9000), Direction: directionEgress, Protocol: 17,
+		MatchFlags: ruleMatchValid,
+	}
+	require.NoError(t, objects.Rules.Update(&allowUDP, &allow, ebpf.UpdateAny))
+	first := makeUDPFragment(sandboxIP, remoteIP, 32000, 9000, 77, 0, true)
+	ret, _, err = objects.EgressProgram.Test(first)
+	require.NoError(t, err)
+	assert.Equal(t, uint32(0), ret)
+	second := makeUDPFragment(sandboxIP, remoteIP, 0, 0, 77, 1, false)
+	ret, _, err = objects.EgressProgram.Test(second)
+	require.NoError(t, err)
+	assert.Equal(t, uint32(0), ret, "a later fragment follows its allowed first fragment")
+	unknown := makeUDPFragment(sandboxIP, remoteIP, 0, 0, 78, 1, false)
+	ret, _, err = objects.EgressProgram.Test(unknown)
+	require.NoError(t, err)
+	assert.Equal(t, uint32(2), ret, "an out-of-order fragment fails closed")
+}
+
 func TestIntegrationManagerLifecycle(t *testing.T) {
 	require.NoError(t, ensureBPFFS())
 	_ = os.RemoveAll(pinRoot)
@@ -519,10 +605,26 @@ func serveTestDNSTCP(listener net.Listener, calls *atomic.Int32) {
 }
 
 func makeTCPPacket(source, destination net.IP, sourcePort, destinationPort uint16) []byte {
+	return makeTCPPacketWithFlags(source, destination, sourcePort, destinationPort, 0)
+}
+
+func makeTCPPacketWithFlags(source, destination net.IP, sourcePort, destinationPort uint16, flags byte) []byte {
 	packet := makeIPv4Packet(source, destination, 6, 20)
 	binary.BigEndian.PutUint16(packet[34:36], sourcePort)
 	binary.BigEndian.PutUint16(packet[36:38], destinationPort)
 	packet[46] = 0x50 // TCP data offset.
+	packet[47] = flags
+	return packet
+}
+
+func makeUDPFragment(source, destination net.IP, sourcePort, destinationPort, id, offset uint16, more bool) []byte {
+	packet := makeUDPPacket(source, destination, sourcePort, destinationPort)
+	binary.BigEndian.PutUint16(packet[18:20], id)
+	fragment := offset & 0x1fff
+	if more {
+		fragment |= 0x2000
+	}
+	binary.BigEndian.PutUint16(packet[20:22], fragment)
 	return packet
 }
 
@@ -552,5 +654,14 @@ func makeIPv6Packet(nextHeader uint8) []byte {
 	packet[14] = 0x60
 	packet[20] = nextHeader
 	packet[21] = 64
+	return packet
+}
+
+func makeICMPError(source, destination net.IP, kind, code byte, quoted []byte) []byte {
+	const quotedSize = 20 + 8
+	packet := makeIPv4Packet(source, destination, 1, 8+quotedSize)
+	packet[34] = kind
+	packet[35] = code
+	copy(packet[42:], quoted[14:14+quotedSize])
 	return packet
 }

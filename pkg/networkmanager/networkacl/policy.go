@@ -22,6 +22,9 @@ const (
 
 	directionIngress uint8 = 1
 	directionEgress  uint8 = 2
+
+	policyModeStateless uint8 = 1
+	policyModeStateful  uint8 = 2
 )
 
 type Policy struct {
@@ -31,15 +34,18 @@ type Policy struct {
 
 type TrafficPolicy struct {
 	DefaultAction uint8         `json:"default_action"`
+	Mode          uint8         `json:"mode,omitempty"`
 	Rules         []TrafficRule `json:"rules,omitempty"`
 }
 
 type TrafficRule struct {
-	Action     uint8   `json:"action"`
-	Directions []uint8 `json:"directions"`
-	Protocol   uint8   `json:"protocol"`
-	PeerIP     [4]byte `json:"peer_ip"`
-	PeerPort   uint16  `json:"peer_port"`
+	Action      uint8   `json:"action"`
+	Directions  []uint8 `json:"directions"`
+	Protocol    uint8   `json:"protocol"`
+	PeerIP      [4]byte `json:"peer_ip"`
+	PeerAny     bool    `json:"peer_any,omitempty"`
+	PeerPort    uint16  `json:"peer_port"`
+	SandboxPort uint16  `json:"sandbox_port,omitempty"`
 }
 
 type DNSPolicy struct {
@@ -80,7 +86,11 @@ func normalizeTraffic(input *runtime.TrafficPolicy) (*TrafficPolicy, error) {
 	if err != nil {
 		return nil, fmt.Errorf("traffic default action: %w", err)
 	}
-	out := &TrafficPolicy{DefaultAction: defaultAction, Rules: make([]TrafficRule, 0, len(input.Rules))}
+	mode, err := normalizePolicyMode(input.Mode)
+	if err != nil {
+		return nil, fmt.Errorf("traffic policy mode: %w", err)
+	}
+	out := &TrafficPolicy{DefaultAction: defaultAction, Mode: mode, Rules: make([]TrafficRule, 0, len(input.Rules))}
 	for index, inputRule := range input.Rules {
 		if inputRule == nil {
 			return nil, fmt.Errorf("traffic rule %d is nil", index)
@@ -97,30 +107,52 @@ func normalizeTraffic(input *runtime.TrafficPolicy) (*TrafficPolicy, error) {
 		if err != nil {
 			return nil, fmt.Errorf("traffic rule %d protocol: %w", index, err)
 		}
-		if inputRule.Peer == nil {
-			return nil, fmt.Errorf("traffic rule %d peer is required", index)
+		if inputRule.SandboxPort > 65535 {
+			return nil, fmt.Errorf("traffic rule %d sandbox port %d exceeds 65535", index, inputRule.SandboxPort)
 		}
-		parsed := net.ParseIP(strings.TrimSpace(inputRule.Peer.Address))
-		if parsed == nil || parsed.To4() == nil || strings.Contains(inputRule.Peer.Address, ":") {
-			return nil, fmt.Errorf("traffic rule %d peer address %q is not IPv4", index, inputRule.Peer.Address)
-		}
-		if inputRule.Peer.Port > 65535 {
-			return nil, fmt.Errorf("traffic rule %d peer port %d exceeds 65535", index, inputRule.Peer.Port)
-		}
-		if inputRule.Peer.Port != 0 && protocol != 6 && protocol != 17 {
-			return nil, fmt.Errorf("traffic rule %d uses a port with a non-TCP/UDP protocol", index)
+		if inputRule.SandboxPort != 0 && protocol != 6 && protocol != 17 {
+			return nil, fmt.Errorf("traffic rule %d uses a sandbox port with a non-TCP/UDP protocol", index)
 		}
 		var peerIP [4]byte
-		copy(peerIP[:], parsed.To4())
+		peerAny := inputRule.Peer == nil
+		peerPort := uint16(0)
+		if inputRule.Peer != nil {
+			parsed := net.ParseIP(strings.TrimSpace(inputRule.Peer.Address))
+			if parsed == nil || parsed.To4() == nil || strings.Contains(inputRule.Peer.Address, ":") {
+				return nil, fmt.Errorf("traffic rule %d peer address %q is not IPv4", index, inputRule.Peer.Address)
+			}
+			if inputRule.Peer.Port > 65535 {
+				return nil, fmt.Errorf("traffic rule %d peer port %d exceeds 65535", index, inputRule.Peer.Port)
+			}
+			if inputRule.Peer.Port != 0 && protocol != 6 && protocol != 17 {
+				return nil, fmt.Errorf("traffic rule %d uses a peer port with a non-TCP/UDP protocol", index)
+			}
+			copy(peerIP[:], parsed.To4())
+			peerPort = uint16(inputRule.Peer.Port)
+		}
 		out.Rules = append(out.Rules, TrafficRule{
-			Action:     action,
-			Directions: directions,
-			Protocol:   protocol,
-			PeerIP:     peerIP,
-			PeerPort:   uint16(inputRule.Peer.Port),
+			Action:      action,
+			Directions:  directions,
+			Protocol:    protocol,
+			PeerIP:      peerIP,
+			PeerAny:     peerAny,
+			PeerPort:    peerPort,
+			SandboxPort: uint16(inputRule.SandboxPort),
 		})
 	}
 	return out, nil
+}
+
+func normalizePolicyMode(mode runtime.TrafficPolicyMode) (uint8, error) {
+	switch mode {
+	case runtime.TrafficPolicyMode_TRAFFIC_POLICY_MODE_UNSPECIFIED,
+		runtime.TrafficPolicyMode_TRAFFIC_POLICY_MODE_STATELESS:
+		return policyModeStateless, nil
+	case runtime.TrafficPolicyMode_TRAFFIC_POLICY_MODE_STATEFUL:
+		return policyModeStateful, nil
+	default:
+		return 0, fmt.Errorf("mode must be STATELESS or STATEFUL")
+	}
 }
 
 func normalizeDNS(input *runtime.DNSPolicy) (*DNSPolicy, error) {

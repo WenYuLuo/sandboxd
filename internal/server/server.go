@@ -784,6 +784,7 @@ func NewSandboxService(root, configPath string) (result SandboxService, retErr e
 			return nil, errors.New("network ACL requires interface management")
 		}
 		s.aclMgr, err = networkacl.New(networkacl.Config{
+			Backend:                            cfg.NatBackend,
 			BridgeIP:                           interfaceMgr.BridgeIp,
 			ResolverPath:                       cfg.ResolvConfPath,
 			Store:                              s.store,

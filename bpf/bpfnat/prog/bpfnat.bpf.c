@@ -25,7 +25,9 @@ int sandboxd_egress_bpfnat(struct __sk_buff *skb)
     };
     int ret = 0;
 
-    dnat_v4_rev_nat(skb);
+    ret = dnat_v4_rev_nat(skb);
+    if (ret < 0)
+        return TC_ACT_SHOT;
 
     if (snat_v4_prepare_state(skb, &target))
         ret = snat_v4_nat(skb, &target);
@@ -45,8 +47,12 @@ int sandboxd_ingress_bpfnat(struct __sk_buff *skb)
         .egress_gateway = 0,
     };
 
-    snat_v4_rev_nat(skb, &target);
-    dnat_v4_nat(skb);
+    int ret = snat_v4_rev_nat(skb, &target);
+    if (ret < 0)
+        return TC_ACT_SHOT;
+    ret = dnat_v4_nat(skb);
+    if (ret < 0)
+        return TC_ACT_SHOT;
     return TC_ACT_OK;
 }
 
@@ -57,7 +63,10 @@ int sandboxd_local_ingress_bpfnat(struct __sk_buff *skb)
     __u32 key = 0;
     __u32 *ifindex;
 
-    if (dnat_v4_nat(skb) <= 0)
+    int ret = dnat_v4_nat(skb);
+    if (ret < 0)
+        return TC_ACT_SHOT;
+    if (ret == 0)
         return TC_ACT_OK;
 
     ifindex = bpf_map_lookup_elem(&LOCAL_REDIRECT_MAP, &key);
@@ -72,6 +81,5 @@ SEC("tc/sandboxd_bridge_ingress")
 int sandboxd_bridge_ingress_bpfnat(struct __sk_buff *skb)
 {
     /* ARP and IPv6 share this bridge, so a non-IPv4 parse is not an error. */
-    dnat_v4_rev_nat(skb);
-    return TC_ACT_OK;
+    return dnat_v4_rev_nat(skb) < 0 ? TC_ACT_SHOT : TC_ACT_OK;
 }

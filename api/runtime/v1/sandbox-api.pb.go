@@ -194,6 +194,57 @@ func (NetworkProtocol) EnumDescriptor() ([]byte, []int) {
 	return file_api_runtime_v1_sandbox_api_proto_rawDescGZIP(), []int{2}
 }
 
+// TrafficPolicyMode selects whether replies are evaluated independently or
+// are admitted from connection state created by an allowed new flow.
+type TrafficPolicyMode int32
+
+const (
+	TrafficPolicyMode_TRAFFIC_POLICY_MODE_UNSPECIFIED TrafficPolicyMode = 0
+	TrafficPolicyMode_TRAFFIC_POLICY_MODE_STATELESS   TrafficPolicyMode = 1
+	TrafficPolicyMode_TRAFFIC_POLICY_MODE_STATEFUL    TrafficPolicyMode = 2
+)
+
+// Enum value maps for TrafficPolicyMode.
+var (
+	TrafficPolicyMode_name = map[int32]string{
+		0: "TRAFFIC_POLICY_MODE_UNSPECIFIED",
+		1: "TRAFFIC_POLICY_MODE_STATELESS",
+		2: "TRAFFIC_POLICY_MODE_STATEFUL",
+	}
+	TrafficPolicyMode_value = map[string]int32{
+		"TRAFFIC_POLICY_MODE_UNSPECIFIED": 0,
+		"TRAFFIC_POLICY_MODE_STATELESS":   1,
+		"TRAFFIC_POLICY_MODE_STATEFUL":    2,
+	}
+)
+
+func (x TrafficPolicyMode) Enum() *TrafficPolicyMode {
+	p := new(TrafficPolicyMode)
+	*p = x
+	return p
+}
+
+func (x TrafficPolicyMode) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (TrafficPolicyMode) Descriptor() protoreflect.EnumDescriptor {
+	return file_api_runtime_v1_sandbox_api_proto_enumTypes[3].Descriptor()
+}
+
+func (TrafficPolicyMode) Type() protoreflect.EnumType {
+	return &file_api_runtime_v1_sandbox_api_proto_enumTypes[3]
+}
+
+func (x TrafficPolicyMode) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use TrafficPolicyMode.Descriptor instead.
+func (TrafficPolicyMode) EnumDescriptor() ([]byte, []int) {
+	return file_api_runtime_v1_sandbox_api_proto_rawDescGZIP(), []int{3}
+}
+
 // RootfsSrcType identifies the root filesystem source type.
 type RootfsSrcType int32
 
@@ -228,11 +279,11 @@ func (x RootfsSrcType) String() string {
 }
 
 func (RootfsSrcType) Descriptor() protoreflect.EnumDescriptor {
-	return file_api_runtime_v1_sandbox_api_proto_enumTypes[3].Descriptor()
+	return file_api_runtime_v1_sandbox_api_proto_enumTypes[4].Descriptor()
 }
 
 func (RootfsSrcType) Type() protoreflect.EnumType {
-	return &file_api_runtime_v1_sandbox_api_proto_enumTypes[3]
+	return &file_api_runtime_v1_sandbox_api_proto_enumTypes[4]
 }
 
 func (x RootfsSrcType) Number() protoreflect.EnumNumber {
@@ -241,7 +292,7 @@ func (x RootfsSrcType) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use RootfsSrcType.Descriptor instead.
 func (RootfsSrcType) EnumDescriptor() ([]byte, []int) {
-	return file_api_runtime_v1_sandbox_api_proto_rawDescGZIP(), []int{3}
+	return file_api_runtime_v1_sandbox_api_proto_rawDescGZIP(), []int{4}
 }
 
 // SandboxState is the persisted lifecycle state of a sandbox.
@@ -278,11 +329,11 @@ func (x SandboxState) String() string {
 }
 
 func (SandboxState) Descriptor() protoreflect.EnumDescriptor {
-	return file_api_runtime_v1_sandbox_api_proto_enumTypes[4].Descriptor()
+	return file_api_runtime_v1_sandbox_api_proto_enumTypes[5].Descriptor()
 }
 
 func (SandboxState) Type() protoreflect.EnumType {
-	return &file_api_runtime_v1_sandbox_api_proto_enumTypes[4]
+	return &file_api_runtime_v1_sandbox_api_proto_enumTypes[5]
 }
 
 func (x SandboxState) Number() protoreflect.EnumNumber {
@@ -291,7 +342,7 @@ func (x SandboxState) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use SandboxState.Descriptor instead.
 func (SandboxState) EnumDescriptor() ([]byte, []int) {
-	return file_api_runtime_v1_sandbox_api_proto_rawDescGZIP(), []int{4}
+	return file_api_runtime_v1_sandbox_api_proto_rawDescGZIP(), []int{5}
 }
 
 // NetworkEndpoint identifies the remote peer matched by a traffic rule.
@@ -351,11 +402,15 @@ func (x *NetworkEndpoint) GetPort() uint32 {
 
 // TrafficRule describes one ingress or egress packet rule.
 type TrafficRule struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Action        NetworkPolicyAction    `protobuf:"varint,1,opt,name=action,proto3,enum=runtime.v1.NetworkPolicyAction" json:"action,omitempty"`
-	Direction     NetworkDirection       `protobuf:"varint,2,opt,name=direction,proto3,enum=runtime.v1.NetworkDirection" json:"direction,omitempty"`
-	Protocol      NetworkProtocol        `protobuf:"varint,3,opt,name=protocol,proto3,enum=runtime.v1.NetworkProtocol" json:"protocol,omitempty"`
-	Peer          *NetworkEndpoint       `protobuf:"bytes,4,opt,name=peer,proto3" json:"peer,omitempty"`
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	Action    NetworkPolicyAction    `protobuf:"varint,1,opt,name=action,proto3,enum=runtime.v1.NetworkPolicyAction" json:"action,omitempty"`
+	Direction NetworkDirection       `protobuf:"varint,2,opt,name=direction,proto3,enum=runtime.v1.NetworkDirection" json:"direction,omitempty"`
+	Protocol  NetworkProtocol        `protobuf:"varint,3,opt,name=protocol,proto3,enum=runtime.v1.NetworkProtocol" json:"protocol,omitempty"`
+	Peer      *NetworkEndpoint       `protobuf:"bytes,4,opt,name=peer,proto3" json:"peer,omitempty"`
+	// SandboxPort is the destination port on ingress and source port on
+	// egress. Zero matches any sandbox port. An omitted peer matches any
+	// remote address and port.
+	SandboxPort   uint32 `protobuf:"varint,5,opt,name=sandbox_port,json=sandboxPort,proto3" json:"sandbox_port,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -418,11 +473,19 @@ func (x *TrafficRule) GetPeer() *NetworkEndpoint {
 	return nil
 }
 
+func (x *TrafficRule) GetSandboxPort() uint32 {
+	if x != nil {
+		return x.SandboxPort
+	}
+	return 0
+}
+
 // TrafficPolicy controls IPv4 packets crossing a sandbox's host veth.
 type TrafficPolicy struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	DefaultAction NetworkPolicyAction    `protobuf:"varint,1,opt,name=default_action,json=defaultAction,proto3,enum=runtime.v1.NetworkPolicyAction" json:"default_action,omitempty"`
 	Rules         []*TrafficRule         `protobuf:"bytes,2,rep,name=rules,proto3" json:"rules,omitempty"`
+	Mode          TrafficPolicyMode      `protobuf:"varint,3,opt,name=mode,proto3,enum=runtime.v1.TrafficPolicyMode" json:"mode,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -469,6 +532,13 @@ func (x *TrafficPolicy) GetRules() []*TrafficRule {
 		return x.Rules
 	}
 	return nil
+}
+
+func (x *TrafficPolicy) GetMode() TrafficPolicyMode {
+	if x != nil {
+		return x.Mode
+	}
+	return TrafficPolicyMode_TRAFFIC_POLICY_MODE_UNSPECIFIED
 }
 
 // DNSRule matches either an exact DNS name or a leading "*." suffix pattern.
@@ -2479,15 +2549,17 @@ const file_api_runtime_v1_sandbox_api_proto_rawDesc = "" +
 	"runtime.v1\"?\n" +
 	"\x0fNetworkEndpoint\x12\x18\n" +
 	"\aaddress\x18\x01 \x01(\tR\aaddress\x12\x12\n" +
-	"\x04port\x18\x02 \x01(\rR\x04port\"\xec\x01\n" +
+	"\x04port\x18\x02 \x01(\rR\x04port\"\x8f\x02\n" +
 	"\vTrafficRule\x127\n" +
 	"\x06action\x18\x01 \x01(\x0e2\x1f.runtime.v1.NetworkPolicyActionR\x06action\x12:\n" +
 	"\tdirection\x18\x02 \x01(\x0e2\x1c.runtime.v1.NetworkDirectionR\tdirection\x127\n" +
 	"\bprotocol\x18\x03 \x01(\x0e2\x1b.runtime.v1.NetworkProtocolR\bprotocol\x12/\n" +
-	"\x04peer\x18\x04 \x01(\v2\x1b.runtime.v1.NetworkEndpointR\x04peer\"\x86\x01\n" +
+	"\x04peer\x18\x04 \x01(\v2\x1b.runtime.v1.NetworkEndpointR\x04peer\x12!\n" +
+	"\fsandbox_port\x18\x05 \x01(\rR\vsandboxPort\"\xb9\x01\n" +
 	"\rTrafficPolicy\x12F\n" +
 	"\x0edefault_action\x18\x01 \x01(\x0e2\x1f.runtime.v1.NetworkPolicyActionR\rdefaultAction\x12-\n" +
-	"\x05rules\x18\x02 \x03(\v2\x17.runtime.v1.TrafficRuleR\x05rules\"\\\n" +
+	"\x05rules\x18\x02 \x03(\v2\x17.runtime.v1.TrafficRuleR\x05rules\x121\n" +
+	"\x04mode\x18\x03 \x01(\x0e2\x1d.runtime.v1.TrafficPolicyModeR\x04mode\"\\\n" +
 	"\aDNSRule\x127\n" +
 	"\x06action\x18\x01 \x01(\x0e2\x1f.runtime.v1.NetworkPolicyActionR\x06action\x12\x18\n" +
 	"\apattern\x18\x02 \x01(\tR\apattern\"~\n" +
@@ -2683,7 +2755,11 @@ const file_api_runtime_v1_sandbox_api_proto_rawDesc = "" +
 	"\x14NETWORK_PROTOCOL_ANY\x10\x01\x12\x18\n" +
 	"\x14NETWORK_PROTOCOL_TCP\x10\x02\x12\x18\n" +
 	"\x14NETWORK_PROTOCOL_UDP\x10\x03\x12\x19\n" +
-	"\x15NETWORK_PROTOCOL_ICMP\x10\x04*-\n" +
+	"\x15NETWORK_PROTOCOL_ICMP\x10\x04*}\n" +
+	"\x11TrafficPolicyMode\x12#\n" +
+	"\x1fTRAFFIC_POLICY_MODE_UNSPECIFIED\x10\x00\x12!\n" +
+	"\x1dTRAFFIC_POLICY_MODE_STATELESS\x10\x01\x12 \n" +
+	"\x1cTRAFFIC_POLICY_MODE_STATEFUL\x10\x02*-\n" +
 	"\rRootfsSrcType\x12\x06\n" +
 	"\x02S3\x10\x00\x12\t\n" +
 	"\x05IMAGE\x10\x01\x12\t\n" +
@@ -2713,113 +2789,115 @@ func file_api_runtime_v1_sandbox_api_proto_rawDescGZIP() []byte {
 	return file_api_runtime_v1_sandbox_api_proto_rawDescData
 }
 
-var file_api_runtime_v1_sandbox_api_proto_enumTypes = make([]protoimpl.EnumInfo, 5)
+var file_api_runtime_v1_sandbox_api_proto_enumTypes = make([]protoimpl.EnumInfo, 6)
 var file_api_runtime_v1_sandbox_api_proto_msgTypes = make([]protoimpl.MessageInfo, 41)
 var file_api_runtime_v1_sandbox_api_proto_goTypes = []any{
 	(NetworkPolicyAction)(0),              // 0: runtime.v1.NetworkPolicyAction
 	(NetworkDirection)(0),                 // 1: runtime.v1.NetworkDirection
 	(NetworkProtocol)(0),                  // 2: runtime.v1.NetworkProtocol
-	(RootfsSrcType)(0),                    // 3: runtime.v1.RootfsSrcType
-	(SandboxState)(0),                     // 4: runtime.v1.SandboxState
-	(*NetworkEndpoint)(nil),               // 5: runtime.v1.NetworkEndpoint
-	(*TrafficRule)(nil),                   // 6: runtime.v1.TrafficRule
-	(*TrafficPolicy)(nil),                 // 7: runtime.v1.TrafficPolicy
-	(*DNSRule)(nil),                       // 8: runtime.v1.DNSRule
-	(*DNSPolicy)(nil),                     // 9: runtime.v1.DNSPolicy
-	(*NetworkPolicy)(nil),                 // 10: runtime.v1.NetworkPolicy
-	(*SetNetworkPolicyRequest)(nil),       // 11: runtime.v1.SetNetworkPolicyRequest
-	(*SetNetworkPolicyResponse)(nil),      // 12: runtime.v1.SetNetworkPolicyResponse
-	(*S3Config)(nil),                      // 13: runtime.v1.S3Config
-	(*RootfsConfig)(nil),                  // 14: runtime.v1.RootfsConfig
-	(*Mount)(nil),                         // 15: runtime.v1.Mount
-	(*XpuAllocation)(nil),                 // 16: runtime.v1.XpuAllocation
-	(*StartRequest)(nil),                  // 17: runtime.v1.StartRequest
-	(*StartResponse)(nil),                 // 18: runtime.v1.StartResponse
-	(*DeleteRequest)(nil),                 // 19: runtime.v1.DeleteRequest
-	(*DeleteResponse)(nil),                // 20: runtime.v1.DeleteResponse
-	(*WaitRequest)(nil),                   // 21: runtime.v1.WaitRequest
-	(*WaitResponse)(nil),                  // 22: runtime.v1.WaitResponse
-	(*ListSandboxesRequest)(nil),          // 23: runtime.v1.ListSandboxesRequest
-	(*ListSandboxesResponse)(nil),         // 24: runtime.v1.ListSandboxesResponse
-	(*SandboxStatus)(nil),                 // 25: runtime.v1.SandboxStatus
-	(*KeyValue)(nil),                      // 26: runtime.v1.KeyValue
-	(*LinuxSandboxResources)(nil),         // 27: runtime.v1.LinuxSandboxResources
-	(*HugepageLimit)(nil),                 // 28: runtime.v1.HugepageLimit
-	(*SandboxMetadata)(nil),               // 29: runtime.v1.SandboxMetadata
-	(*SandboxMetadataList)(nil),           // 30: runtime.v1.SandboxMetadataList
-	(*StatsRequest)(nil),                  // 31: runtime.v1.StatsRequest
-	(*StatsResponse)(nil),                 // 32: runtime.v1.StatsResponse
-	(*ListAvailableRuntimesRequest)(nil),  // 33: runtime.v1.ListAvailableRuntimesRequest
-	(*ListAvailableRuntimesResponse)(nil), // 34: runtime.v1.ListAvailableRuntimesResponse
-	nil,                                   // 35: runtime.v1.StartRequest.EnvsEntry
-	nil,                                   // 36: runtime.v1.StartRequest.ResourcesEntry
-	nil,                                   // 37: runtime.v1.StartRequest.LabelsEntry
-	nil,                                   // 38: runtime.v1.StartRequest.MetricLabelsEntry
-	nil,                                   // 39: runtime.v1.ListSandboxesRequest.SelectorEntry
-	nil,                                   // 40: runtime.v1.SandboxStatus.LabelsEntry
-	nil,                                   // 41: runtime.v1.SandboxStatus.MetricLabelsEntry
-	nil,                                   // 42: runtime.v1.LinuxSandboxResources.UnifiedEntry
-	nil,                                   // 43: runtime.v1.SandboxMetadata.LabelsEntry
-	nil,                                   // 44: runtime.v1.SandboxMetadata.MetricLabelsEntry
-	nil,                                   // 45: runtime.v1.SandboxMetadataList.SandboxesEntry
+	(TrafficPolicyMode)(0),                // 3: runtime.v1.TrafficPolicyMode
+	(RootfsSrcType)(0),                    // 4: runtime.v1.RootfsSrcType
+	(SandboxState)(0),                     // 5: runtime.v1.SandboxState
+	(*NetworkEndpoint)(nil),               // 6: runtime.v1.NetworkEndpoint
+	(*TrafficRule)(nil),                   // 7: runtime.v1.TrafficRule
+	(*TrafficPolicy)(nil),                 // 8: runtime.v1.TrafficPolicy
+	(*DNSRule)(nil),                       // 9: runtime.v1.DNSRule
+	(*DNSPolicy)(nil),                     // 10: runtime.v1.DNSPolicy
+	(*NetworkPolicy)(nil),                 // 11: runtime.v1.NetworkPolicy
+	(*SetNetworkPolicyRequest)(nil),       // 12: runtime.v1.SetNetworkPolicyRequest
+	(*SetNetworkPolicyResponse)(nil),      // 13: runtime.v1.SetNetworkPolicyResponse
+	(*S3Config)(nil),                      // 14: runtime.v1.S3Config
+	(*RootfsConfig)(nil),                  // 15: runtime.v1.RootfsConfig
+	(*Mount)(nil),                         // 16: runtime.v1.Mount
+	(*XpuAllocation)(nil),                 // 17: runtime.v1.XpuAllocation
+	(*StartRequest)(nil),                  // 18: runtime.v1.StartRequest
+	(*StartResponse)(nil),                 // 19: runtime.v1.StartResponse
+	(*DeleteRequest)(nil),                 // 20: runtime.v1.DeleteRequest
+	(*DeleteResponse)(nil),                // 21: runtime.v1.DeleteResponse
+	(*WaitRequest)(nil),                   // 22: runtime.v1.WaitRequest
+	(*WaitResponse)(nil),                  // 23: runtime.v1.WaitResponse
+	(*ListSandboxesRequest)(nil),          // 24: runtime.v1.ListSandboxesRequest
+	(*ListSandboxesResponse)(nil),         // 25: runtime.v1.ListSandboxesResponse
+	(*SandboxStatus)(nil),                 // 26: runtime.v1.SandboxStatus
+	(*KeyValue)(nil),                      // 27: runtime.v1.KeyValue
+	(*LinuxSandboxResources)(nil),         // 28: runtime.v1.LinuxSandboxResources
+	(*HugepageLimit)(nil),                 // 29: runtime.v1.HugepageLimit
+	(*SandboxMetadata)(nil),               // 30: runtime.v1.SandboxMetadata
+	(*SandboxMetadataList)(nil),           // 31: runtime.v1.SandboxMetadataList
+	(*StatsRequest)(nil),                  // 32: runtime.v1.StatsRequest
+	(*StatsResponse)(nil),                 // 33: runtime.v1.StatsResponse
+	(*ListAvailableRuntimesRequest)(nil),  // 34: runtime.v1.ListAvailableRuntimesRequest
+	(*ListAvailableRuntimesResponse)(nil), // 35: runtime.v1.ListAvailableRuntimesResponse
+	nil,                                   // 36: runtime.v1.StartRequest.EnvsEntry
+	nil,                                   // 37: runtime.v1.StartRequest.ResourcesEntry
+	nil,                                   // 38: runtime.v1.StartRequest.LabelsEntry
+	nil,                                   // 39: runtime.v1.StartRequest.MetricLabelsEntry
+	nil,                                   // 40: runtime.v1.ListSandboxesRequest.SelectorEntry
+	nil,                                   // 41: runtime.v1.SandboxStatus.LabelsEntry
+	nil,                                   // 42: runtime.v1.SandboxStatus.MetricLabelsEntry
+	nil,                                   // 43: runtime.v1.LinuxSandboxResources.UnifiedEntry
+	nil,                                   // 44: runtime.v1.SandboxMetadata.LabelsEntry
+	nil,                                   // 45: runtime.v1.SandboxMetadata.MetricLabelsEntry
+	nil,                                   // 46: runtime.v1.SandboxMetadataList.SandboxesEntry
 }
 var file_api_runtime_v1_sandbox_api_proto_depIdxs = []int32{
 	0,  // 0: runtime.v1.TrafficRule.action:type_name -> runtime.v1.NetworkPolicyAction
 	1,  // 1: runtime.v1.TrafficRule.direction:type_name -> runtime.v1.NetworkDirection
 	2,  // 2: runtime.v1.TrafficRule.protocol:type_name -> runtime.v1.NetworkProtocol
-	5,  // 3: runtime.v1.TrafficRule.peer:type_name -> runtime.v1.NetworkEndpoint
+	6,  // 3: runtime.v1.TrafficRule.peer:type_name -> runtime.v1.NetworkEndpoint
 	0,  // 4: runtime.v1.TrafficPolicy.default_action:type_name -> runtime.v1.NetworkPolicyAction
-	6,  // 5: runtime.v1.TrafficPolicy.rules:type_name -> runtime.v1.TrafficRule
-	0,  // 6: runtime.v1.DNSRule.action:type_name -> runtime.v1.NetworkPolicyAction
-	0,  // 7: runtime.v1.DNSPolicy.default_action:type_name -> runtime.v1.NetworkPolicyAction
-	8,  // 8: runtime.v1.DNSPolicy.rules:type_name -> runtime.v1.DNSRule
-	7,  // 9: runtime.v1.NetworkPolicy.traffic:type_name -> runtime.v1.TrafficPolicy
-	9,  // 10: runtime.v1.NetworkPolicy.dns:type_name -> runtime.v1.DNSPolicy
-	10, // 11: runtime.v1.SetNetworkPolicyRequest.network_policy:type_name -> runtime.v1.NetworkPolicy
-	3,  // 12: runtime.v1.RootfsConfig.type:type_name -> runtime.v1.RootfsSrcType
-	13, // 13: runtime.v1.RootfsConfig.s3_config:type_name -> runtime.v1.S3Config
-	13, // 14: runtime.v1.Mount.s3_config:type_name -> runtime.v1.S3Config
-	14, // 15: runtime.v1.StartRequest.rootfs:type_name -> runtime.v1.RootfsConfig
-	35, // 16: runtime.v1.StartRequest.envs:type_name -> runtime.v1.StartRequest.EnvsEntry
-	15, // 17: runtime.v1.StartRequest.mounts:type_name -> runtime.v1.Mount
-	36, // 18: runtime.v1.StartRequest.resources:type_name -> runtime.v1.StartRequest.ResourcesEntry
-	37, // 19: runtime.v1.StartRequest.labels:type_name -> runtime.v1.StartRequest.LabelsEntry
-	38, // 20: runtime.v1.StartRequest.metric_labels:type_name -> runtime.v1.StartRequest.MetricLabelsEntry
-	16, // 21: runtime.v1.StartRequest.xpu_allocations:type_name -> runtime.v1.XpuAllocation
-	10, // 22: runtime.v1.StartRequest.network_policy:type_name -> runtime.v1.NetworkPolicy
-	39, // 23: runtime.v1.ListSandboxesRequest.selector:type_name -> runtime.v1.ListSandboxesRequest.SelectorEntry
-	25, // 24: runtime.v1.ListSandboxesResponse.sandboxes:type_name -> runtime.v1.SandboxStatus
-	4,  // 25: runtime.v1.SandboxStatus.state:type_name -> runtime.v1.SandboxState
-	40, // 26: runtime.v1.SandboxStatus.labels:type_name -> runtime.v1.SandboxStatus.LabelsEntry
-	15, // 27: runtime.v1.SandboxStatus.mounts:type_name -> runtime.v1.Mount
-	26, // 28: runtime.v1.SandboxStatus.envs:type_name -> runtime.v1.KeyValue
-	27, // 29: runtime.v1.SandboxStatus.resources:type_name -> runtime.v1.LinuxSandboxResources
-	41, // 30: runtime.v1.SandboxStatus.metric_labels:type_name -> runtime.v1.SandboxStatus.MetricLabelsEntry
-	28, // 31: runtime.v1.LinuxSandboxResources.hugepage_limits:type_name -> runtime.v1.HugepageLimit
-	42, // 32: runtime.v1.LinuxSandboxResources.unified:type_name -> runtime.v1.LinuxSandboxResources.UnifiedEntry
-	43, // 33: runtime.v1.SandboxMetadata.labels:type_name -> runtime.v1.SandboxMetadata.LabelsEntry
-	44, // 34: runtime.v1.SandboxMetadata.metric_labels:type_name -> runtime.v1.SandboxMetadata.MetricLabelsEntry
-	45, // 35: runtime.v1.SandboxMetadataList.sandboxes:type_name -> runtime.v1.SandboxMetadataList.SandboxesEntry
-	29, // 36: runtime.v1.SandboxMetadataList.SandboxesEntry.value:type_name -> runtime.v1.SandboxMetadata
-	17, // 37: runtime.v1.SandboxService.Start:input_type -> runtime.v1.StartRequest
-	19, // 38: runtime.v1.SandboxService.Delete:input_type -> runtime.v1.DeleteRequest
-	21, // 39: runtime.v1.SandboxService.Wait:input_type -> runtime.v1.WaitRequest
-	23, // 40: runtime.v1.SandboxService.List:input_type -> runtime.v1.ListSandboxesRequest
-	31, // 41: runtime.v1.SandboxService.Stats:input_type -> runtime.v1.StatsRequest
-	33, // 42: runtime.v1.SandboxService.ListAvailableRuntimes:input_type -> runtime.v1.ListAvailableRuntimesRequest
-	11, // 43: runtime.v1.SandboxService.SetNetworkPolicy:input_type -> runtime.v1.SetNetworkPolicyRequest
-	18, // 44: runtime.v1.SandboxService.Start:output_type -> runtime.v1.StartResponse
-	20, // 45: runtime.v1.SandboxService.Delete:output_type -> runtime.v1.DeleteResponse
-	22, // 46: runtime.v1.SandboxService.Wait:output_type -> runtime.v1.WaitResponse
-	24, // 47: runtime.v1.SandboxService.List:output_type -> runtime.v1.ListSandboxesResponse
-	32, // 48: runtime.v1.SandboxService.Stats:output_type -> runtime.v1.StatsResponse
-	34, // 49: runtime.v1.SandboxService.ListAvailableRuntimes:output_type -> runtime.v1.ListAvailableRuntimesResponse
-	12, // 50: runtime.v1.SandboxService.SetNetworkPolicy:output_type -> runtime.v1.SetNetworkPolicyResponse
-	44, // [44:51] is the sub-list for method output_type
-	37, // [37:44] is the sub-list for method input_type
-	37, // [37:37] is the sub-list for extension type_name
-	37, // [37:37] is the sub-list for extension extendee
-	0,  // [0:37] is the sub-list for field type_name
+	7,  // 5: runtime.v1.TrafficPolicy.rules:type_name -> runtime.v1.TrafficRule
+	3,  // 6: runtime.v1.TrafficPolicy.mode:type_name -> runtime.v1.TrafficPolicyMode
+	0,  // 7: runtime.v1.DNSRule.action:type_name -> runtime.v1.NetworkPolicyAction
+	0,  // 8: runtime.v1.DNSPolicy.default_action:type_name -> runtime.v1.NetworkPolicyAction
+	9,  // 9: runtime.v1.DNSPolicy.rules:type_name -> runtime.v1.DNSRule
+	8,  // 10: runtime.v1.NetworkPolicy.traffic:type_name -> runtime.v1.TrafficPolicy
+	10, // 11: runtime.v1.NetworkPolicy.dns:type_name -> runtime.v1.DNSPolicy
+	11, // 12: runtime.v1.SetNetworkPolicyRequest.network_policy:type_name -> runtime.v1.NetworkPolicy
+	4,  // 13: runtime.v1.RootfsConfig.type:type_name -> runtime.v1.RootfsSrcType
+	14, // 14: runtime.v1.RootfsConfig.s3_config:type_name -> runtime.v1.S3Config
+	14, // 15: runtime.v1.Mount.s3_config:type_name -> runtime.v1.S3Config
+	15, // 16: runtime.v1.StartRequest.rootfs:type_name -> runtime.v1.RootfsConfig
+	36, // 17: runtime.v1.StartRequest.envs:type_name -> runtime.v1.StartRequest.EnvsEntry
+	16, // 18: runtime.v1.StartRequest.mounts:type_name -> runtime.v1.Mount
+	37, // 19: runtime.v1.StartRequest.resources:type_name -> runtime.v1.StartRequest.ResourcesEntry
+	38, // 20: runtime.v1.StartRequest.labels:type_name -> runtime.v1.StartRequest.LabelsEntry
+	39, // 21: runtime.v1.StartRequest.metric_labels:type_name -> runtime.v1.StartRequest.MetricLabelsEntry
+	17, // 22: runtime.v1.StartRequest.xpu_allocations:type_name -> runtime.v1.XpuAllocation
+	11, // 23: runtime.v1.StartRequest.network_policy:type_name -> runtime.v1.NetworkPolicy
+	40, // 24: runtime.v1.ListSandboxesRequest.selector:type_name -> runtime.v1.ListSandboxesRequest.SelectorEntry
+	26, // 25: runtime.v1.ListSandboxesResponse.sandboxes:type_name -> runtime.v1.SandboxStatus
+	5,  // 26: runtime.v1.SandboxStatus.state:type_name -> runtime.v1.SandboxState
+	41, // 27: runtime.v1.SandboxStatus.labels:type_name -> runtime.v1.SandboxStatus.LabelsEntry
+	16, // 28: runtime.v1.SandboxStatus.mounts:type_name -> runtime.v1.Mount
+	27, // 29: runtime.v1.SandboxStatus.envs:type_name -> runtime.v1.KeyValue
+	28, // 30: runtime.v1.SandboxStatus.resources:type_name -> runtime.v1.LinuxSandboxResources
+	42, // 31: runtime.v1.SandboxStatus.metric_labels:type_name -> runtime.v1.SandboxStatus.MetricLabelsEntry
+	29, // 32: runtime.v1.LinuxSandboxResources.hugepage_limits:type_name -> runtime.v1.HugepageLimit
+	43, // 33: runtime.v1.LinuxSandboxResources.unified:type_name -> runtime.v1.LinuxSandboxResources.UnifiedEntry
+	44, // 34: runtime.v1.SandboxMetadata.labels:type_name -> runtime.v1.SandboxMetadata.LabelsEntry
+	45, // 35: runtime.v1.SandboxMetadata.metric_labels:type_name -> runtime.v1.SandboxMetadata.MetricLabelsEntry
+	46, // 36: runtime.v1.SandboxMetadataList.sandboxes:type_name -> runtime.v1.SandboxMetadataList.SandboxesEntry
+	30, // 37: runtime.v1.SandboxMetadataList.SandboxesEntry.value:type_name -> runtime.v1.SandboxMetadata
+	18, // 38: runtime.v1.SandboxService.Start:input_type -> runtime.v1.StartRequest
+	20, // 39: runtime.v1.SandboxService.Delete:input_type -> runtime.v1.DeleteRequest
+	22, // 40: runtime.v1.SandboxService.Wait:input_type -> runtime.v1.WaitRequest
+	24, // 41: runtime.v1.SandboxService.List:input_type -> runtime.v1.ListSandboxesRequest
+	32, // 42: runtime.v1.SandboxService.Stats:input_type -> runtime.v1.StatsRequest
+	34, // 43: runtime.v1.SandboxService.ListAvailableRuntimes:input_type -> runtime.v1.ListAvailableRuntimesRequest
+	12, // 44: runtime.v1.SandboxService.SetNetworkPolicy:input_type -> runtime.v1.SetNetworkPolicyRequest
+	19, // 45: runtime.v1.SandboxService.Start:output_type -> runtime.v1.StartResponse
+	21, // 46: runtime.v1.SandboxService.Delete:output_type -> runtime.v1.DeleteResponse
+	23, // 47: runtime.v1.SandboxService.Wait:output_type -> runtime.v1.WaitResponse
+	25, // 48: runtime.v1.SandboxService.List:output_type -> runtime.v1.ListSandboxesResponse
+	33, // 49: runtime.v1.SandboxService.Stats:output_type -> runtime.v1.StatsResponse
+	35, // 50: runtime.v1.SandboxService.ListAvailableRuntimes:output_type -> runtime.v1.ListAvailableRuntimesResponse
+	13, // 51: runtime.v1.SandboxService.SetNetworkPolicy:output_type -> runtime.v1.SetNetworkPolicyResponse
+	45, // [45:52] is the sub-list for method output_type
+	38, // [38:45] is the sub-list for method input_type
+	38, // [38:38] is the sub-list for extension type_name
+	38, // [38:38] is the sub-list for extension extendee
+	0,  // [0:38] is the sub-list for field type_name
 }
 
 func init() { file_api_runtime_v1_sandbox_api_proto_init() }
@@ -2842,7 +2920,7 @@ func file_api_runtime_v1_sandbox_api_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_api_runtime_v1_sandbox_api_proto_rawDesc), len(file_api_runtime_v1_sandbox_api_proto_rawDesc)),
-			NumEnums:      5,
+			NumEnums:      6,
 			NumMessages:   41,
 			NumExtensions: 0,
 			NumServices:   1,
