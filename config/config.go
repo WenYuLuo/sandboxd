@@ -100,8 +100,9 @@ type RuntimeConfig struct {
 	// FilestoreXFSEnabled selects XFS for a bounded filestore.
 	FilestoreXFSEnabled bool `toml:"filestore_xfs_enabled" json:"filestoreXFSEnabled"`
 
-	// LoopDeviceDir contains loop-control and loopN device nodes. The default
-	// is /dev; deployments may point it at another mounted device namespace.
+	// LoopDeviceDir contains loop-control and loopN device nodes for bounded
+	// filestores and read-only EROFS images. The default is /dev; deployments
+	// may point it at another mounted device namespace.
 	LoopDeviceDir string `toml:"loop_device_dir" json:"loopDeviceDir"`
 
 	// OverlayTmpfsSize specifies the size limit for the gVisor writable overlay
