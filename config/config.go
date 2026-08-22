@@ -28,6 +28,11 @@ const (
 	DefaultCPUPeriodMicros = uint64(100000)
 )
 
+const (
+	RunscPlatformSystrap = "systrap"
+	RunscPlatformKVM     = "kvm"
+)
+
 // Config contains all configurations for sandbox server.
 type Config struct {
 	// PluginConfig is the config for sandbox plugin.
@@ -80,6 +85,9 @@ type RuntimeConfig struct {
 	// final configuration does not already provide /etc/resolv.conf.
 	ResolvConfPath string `toml:"resolv_conf_path" json:"resolvConfPath"`
 
+	// Runsc configures the gVisor runtime adapter.
+	Runsc RunscConfig `toml:"runsc" json:"runsc"`
+
 	// Kata configures the optional Kata Containers runtime adapter. Kata is
 	// loaded only when runtime_binary contains a "kata" entry.
 	Kata KataConfig `toml:"kata" json:"kata"`
@@ -87,6 +95,10 @@ type RuntimeConfig struct {
 	// Runc configures the optional host-kernel OCI runtime adapter. Runc is
 	// loaded only when runtime_binary contains a "runc" entry.
 	Runc RuncConfig `toml:"runc" json:"runc"`
+
+	// Firecracker configures the optional microVM runtime adapter. It is loaded
+	// only when runtime_binary contains a "firecracker" entry.
+	Firecracker FirecrackerConfig `toml:"firecracker" json:"firecracker"`
 
 	// BasicSpec is the basic spec file for different runtime type.
 	BasicSpec map[string]string `toml:"basic_spec" json:"basicSpec"`
@@ -121,6 +133,12 @@ type RuntimeConfig struct {
 	OverlayTmpfsSize string `toml:"overlay_tmpfs_size" json:"overlayTmpfsSize"`
 }
 
+// RunscConfig contains options passed to the gVisor runsc adapter.
+type RunscConfig struct {
+	// Platform selects gVisor's syscall interception platform.
+	Platform string `toml:"platform" json:"platform"`
+}
+
 // KataConfig contains the host paths and storage settings used by Kata.
 type KataConfig struct {
 	ConfigPath   string `toml:"config_path" json:"configPath"`
@@ -134,6 +152,17 @@ type RuncConfig struct {
 	StateRoot  string `toml:"state_root" json:"stateRoot"`
 	ShimBinary string `toml:"shim_binary" json:"shimBinary"`
 	KVMDevice  string `toml:"kvm_device" json:"kvmDevice"`
+}
+
+// FirecrackerConfig contains immutable guest boot artifacts and VM defaults.
+type FirecrackerConfig struct {
+	KernelImagePath         string `toml:"kernel_image_path" json:"kernelImagePath"`
+	InitrdPath              string `toml:"initrd_path" json:"initrdPath"`
+	KernelArgs              string `toml:"kernel_args" json:"kernelArgs"`
+	KVMDevice               string `toml:"kvm_device" json:"kvmDevice"`
+	DefaultVCPUCount        uint32 `toml:"default_vcpu_count" json:"defaultVCPUCount"`
+	DefaultMemoryMiB        uint32 `toml:"default_memory_mib" json:"defaultMemoryMiB"`
+	DefaultOverlaySizeBytes uint64 `toml:"default_overlay_size_bytes" json:"defaultOverlaySizeBytes"`
 }
 
 type ResourceConfig struct {
@@ -160,6 +189,24 @@ type ResourceConfig struct {
 	PidsMax int64 `toml:"pids_max" json:"pidsMax"`
 	// InterfaceCacheSize is the size of interface cache. Default is same as max_instance_num.
 	InterfaceCacheSize int `toml:"interface_cache_size" json:"interfaceCacheSize"`
+}
+
+// NormalizeRunscPlatform validates the configured gVisor platform. An empty
+// value preserves the historical and upstream default of systrap.
+func NormalizeRunscPlatform(value string) (string, error) {
+	switch normalized := strings.ToLower(strings.TrimSpace(value)); normalized {
+	case "", RunscPlatformSystrap:
+		return RunscPlatformSystrap, nil
+	case RunscPlatformKVM:
+		return RunscPlatformKVM, nil
+	default:
+		return "", fmt.Errorf(
+			"runsc platform must be %q or %q, got %q",
+			RunscPlatformSystrap,
+			RunscPlatformKVM,
+			value,
+		)
+	}
 }
 
 // NormalizeCPULimitMode validates the configured CPU control mode. An empty
@@ -239,10 +286,22 @@ func DefaultConfig() Config {
 				BasicSpec: map[string]string{
 					RuntimeNameRunsc: "/home/akernel/images/config.json",
 				},
+				Runsc: RunscConfig{
+					Platform: DefaultRunscPlatform,
+				},
 				Runc: RuncConfig{
 					StateRoot:  DefaultRuncStateRoot,
 					ShimBinary: DefaultRuncShimBinary,
 					KVMDevice:  DefaultKVMDevice,
+				},
+				Firecracker: FirecrackerConfig{
+					KernelImagePath:         DefaultFirecrackerKernel,
+					InitrdPath:              DefaultFirecrackerInitrd,
+					KernelArgs:              DefaultFirecrackerKernelArgs,
+					KVMDevice:               DefaultKVMDevice,
+					DefaultVCPUCount:        DefaultFirecrackerVCPUs,
+					DefaultMemoryMiB:        DefaultFirecrackerMemoryMiB,
+					DefaultOverlaySizeBytes: DefaultFirecrackerOverlayBytes,
 				},
 				ImageLibDir:              DefaultImageLibDir,
 				FilestoreDir:             DefaultFilestoreDir,

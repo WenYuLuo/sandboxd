@@ -43,6 +43,7 @@ const (
 	DefaultIPRange = "10.88.0.1/16"
 
 	DefaultRunscBinary    = "/usr/local/bin/runsc"
+	DefaultRunscPlatform  = RunscPlatformSystrap
 	DefaultRuncBinary     = "/usr/local/bin/runc"
 	DefaultRuncShimBinary = "/usr/local/bin/runc-shim"
 	DefaultRuncStateRoot  = "/run/sandboxd/runc"
@@ -50,6 +51,14 @@ const (
 	DefaultKataConfig     = "/opt/kata/share/defaults/kata-containers/runtime-rs/configuration-dragonball.toml"
 	DefaultSandboxLogger  = "/usr/local/bin/sandbox-logger"
 	DefaultKVMDevice      = "/dev/kvm"
+
+	DefaultFirecrackerBinary       = "/usr/local/bin/firecracker"
+	DefaultFirecrackerKernel       = "/opt/firecracker/vmlinux"
+	DefaultFirecrackerInitrd       = "/opt/firecracker/initrd.img"
+	DefaultFirecrackerKernelArgs   = "console=ttyS0 reboot=k panic=1 pci=off init=/init random.trust_cpu=on"
+	DefaultFirecrackerVCPUs        = uint32(1)
+	DefaultFirecrackerMemoryMiB    = uint32(512)
+	DefaultFirecrackerOverlayBytes = uint64(10 << 30)
 
 	DefaultKataDANConfigDir = "/run/kata-containers/dans"
 )

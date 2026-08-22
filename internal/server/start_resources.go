@@ -81,7 +81,7 @@ func requiredStartResources(runtimeName string, disableCgroup bool) ([]string, e
 	if configured == nil {
 		return nil, fmt.Errorf("runtime %s is not supported when preparing resources", runtimeName)
 	}
-	if disableCgroup && runtimeName == config.RuntimeNameRunc {
+	if disableCgroup && runtimeName != config.RuntimeNameRunsc {
 		return nil, fmt.Errorf("runtime %s requires cgroup management", runtimeName)
 	}
 	required := make([]string, 0, len(configured))
@@ -125,6 +125,22 @@ func (h *sandboxService) allocateStartResource(
 	default:
 		return "", nil, fmt.Errorf("resource %s is not registered", name)
 	}
+}
+
+// deactivateStartNetwork disconnects a pooled TAP while retaining its lease.
+// Runtime deletion must complete first, and ACL removal must happen afterward.
+func (h *sandboxService) deactivateStartNetwork(resources sandbox.OccupiedResource) error {
+	resource, ok := resources.Resources[config.ResourceNameInterface]
+	if !ok || resource == "" {
+		return nil
+	}
+	if h.networkMgr == nil {
+		return fmt.Errorf("network manager not configured")
+	}
+	if err := h.networkMgr.Deactivate(resource); err != nil {
+		return fmt.Errorf("deactivate sandbox network endpoint: %w", err)
+	}
+	return nil
 }
 
 func (h *sandboxService) releaseStartResources(resources sandbox.OccupiedResource) error {

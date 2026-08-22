@@ -43,6 +43,7 @@ COPY output/runsc /usr/local/bin/runsc
 COPY output/runc /usr/local/bin/runc
 COPY output/runc-shim /usr/local/bin/runc-shim
 COPY output/oom-hog /usr/local/bin/oom-hog
+COPY output/network-policy-client /usr/local/bin/network-policy-client
 COPY test/e2e/e2e-run.sh /usr/local/bin/sandboxd-e2e-run
 
 RUN chmod 0755 \
@@ -52,6 +53,7 @@ RUN chmod 0755 \
         /usr/local/bin/runc \
         /usr/local/bin/runc-shim \
         /usr/local/bin/oom-hog \
+        /usr/local/bin/network-policy-client \
         /usr/local/bin/sandboxd-e2e-run
 
 ENTRYPOINT ["/usr/local/bin/sandboxd-e2e-run"]
