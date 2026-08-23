@@ -17,13 +17,9 @@ package runtime
 import (
 	"context"
 	"errors"
-	"os"
-	"path/filepath"
 	"time"
 
 	runtime "github.com/inclusionAI/sandboxd/api/runtime/v1"
-	"github.com/inclusionAI/sandboxd/config"
-	"github.com/inclusionAI/sandboxd/pkg/errord"
 	"github.com/inclusionAI/sandboxd/pkg/networkmanager"
 )
 
@@ -33,6 +29,27 @@ type Handler interface {
 	Delete(context.Context, string) error
 	List(context.Context) ([]*State, error)
 	Wait(context.Context, string) (Exit, error)
+}
+
+// CheckpointHandler is an optional capability implemented by runtimes that
+// can save and restore caller-owned checkpoint artifacts.
+type CheckpointHandler interface {
+	Checkpoint(context.Context, CheckpointConfig) error
+	Restore(context.Context, StartConfig) error
+}
+
+type CheckpointConfig struct {
+	ID           string
+	Directory    string
+	Compress     bool
+	LeaveRunning bool
+}
+
+// HostResourcesProvider maps guest-visible resources to the host cgroup that
+// encloses a runtime process. VM handlers use it to retain private VMM
+// headroom without changing resources exposed to the guest.
+type HostResourcesProvider interface {
+	HostResources(*runtime.LinuxSandboxResources) *runtime.LinuxSandboxResources
 }
 
 // StartRequestValidator rejects unsupported request sources before sandboxd
@@ -60,6 +77,7 @@ type StartConfig struct {
 	SpecUpdates             *SpecUpdates
 	WritableLayerLimitBytes uint64
 	EnableKVM               bool
+	CheckpointDir           string
 }
 
 // SpecUpdates contains provider-resolved OCI changes. Device providers use
@@ -73,57 +91,6 @@ type SpecUpdates struct {
 	// before provider hooks execute. It is separate from the writable layer
 	// visible to workloads after the sandbox starts.
 	RequiresHostWritableRootfs bool
-}
-
-func NewHandler(cfg config.Config, bin, runtimeName string) (Handler, error) {
-	if _, err := os.Stat(bin); err != nil {
-		return nil, err
-	}
-
-	sandboxRoot := filepath.Join(cfg.RootDir, "containers")
-	switch runtimeName {
-	case config.RuntimeNameRunsc:
-		if cfg.RuntimeConfig.BasicSpec == nil {
-			cfg.RuntimeConfig.BasicSpec = make(map[string]string)
-		}
-		loader, err := NewBundleLoader(cfg.RuntimeConfig.BasicSpec[config.RuntimeNameRunsc], sandboxRoot)
-		if err != nil {
-			return nil, err
-		}
-		return NewRunscHandler(cfg, bin, loader)
-	case config.RuntimeNameKata:
-		loader, err := NewBundleLoader("", sandboxRoot)
-		if err != nil {
-			return nil, err
-		}
-		return NewKataHandler(cfg, bin, loader)
-	case config.RuntimeNameRunc:
-		if cfg.RuntimeConfig.BasicSpec == nil {
-			cfg.RuntimeConfig.BasicSpec = make(map[string]string)
-		}
-		loader, err := NewBundleLoader(
-			cfg.RuntimeConfig.BasicSpec[config.RuntimeNameRunc],
-			sandboxRoot,
-		)
-		if err != nil {
-			return nil, err
-		}
-		return NewRuncHandler(cfg, bin, loader)
-	case config.RuntimeNameFirecracker:
-		if cfg.RuntimeConfig.BasicSpec == nil {
-			cfg.RuntimeConfig.BasicSpec = make(map[string]string)
-		}
-		loader, err := NewBundleLoader(
-			cfg.RuntimeConfig.BasicSpec[config.RuntimeNameFirecracker],
-			sandboxRoot,
-		)
-		if err != nil {
-			return nil, err
-		}
-		return NewFirecrackerHandler(cfg, bin, loader)
-	default:
-		return nil, errord.ErrNotImplemented
-	}
 }
 
 func NewFakeRuntimeHandler() *FakeRuntimeHandler {
