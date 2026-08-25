@@ -15,9 +15,11 @@
 package server
 
 import (
+	"net"
 	"testing"
 
 	"github.com/inclusionAI/sandboxd/config"
+	"github.com/inclusionAI/sandboxd/pkg/networkmanager"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -41,4 +43,21 @@ func TestFirecrackerRequiresCgroup(t *testing.T) {
 	resources, err := requiredStartResources(config.RuntimeNameFirecracker, false)
 	require.NoError(t, err)
 	assert.Equal(t, config.RuntimeResources[config.RuntimeNameFirecracker], resources)
+}
+
+func TestStartSuccessResponseIncludesCommittedEndpoint(t *testing.T) {
+	ports := []string{"tcp:18080:8080"}
+	response := newStartSuccessResponse("sandbox-1", ports, &networkmanager.NetResource{
+		Ip:                 net.ParseIP("10.88.0.2"),
+		EndpointGeneration: 42,
+	})
+
+	assert.Equal(t, int32(0), response.Code)
+	assert.Equal(t, "sandbox-1", response.ID)
+	assert.Equal(t, []string{"tcp:18080:8080"}, response.Ports)
+	assert.Equal(t, "10.88.0.2", response.BridgeIp)
+	assert.Equal(t, uint64(42), response.EndpointGeneration)
+
+	ports[0] = "tcp:19090:9090"
+	assert.Equal(t, []string{"tcp:18080:8080"}, response.Ports)
 }

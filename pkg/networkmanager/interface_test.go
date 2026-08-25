@@ -145,6 +145,39 @@ func TestTapResourcePersistsVersionedIdentity(t *testing.T) {
 	assert.Equal(t, hostMAC, restored.Interface.HardwareAddr)
 }
 
+func TestInterfaceLeaseAssignsAndRotatesEndpointGeneration(t *testing.T) {
+	base := (&NetResource{
+		Interface: &net.Interface{Name: config.PeerVethPrefix + "0a580002"},
+		Ip:        net.ParseIP("10.88.0.2"),
+		Mask:      net.CIDRMask(16, 32),
+		Gateway:   net.ParseIP("10.88.0.1"),
+		Type:      "bridge",
+	}).ToString()
+	m := &InterfaceManager{
+		size:            1,
+		interfaces:      util.New(""),
+		usingInterfaces: cmap.New[struct{}](),
+		idleIp:          util.New(""),
+	}
+	m.interfaces.Push(base)
+	m.total = 1
+
+	firstLease, err := m.Allocate()
+	require.NoError(t, err)
+	first, err := NewNetResource(firstLease)
+	require.NoError(t, err)
+	require.NotZero(t, first.EndpointGeneration)
+	require.Equal(t, "10.88.0.2", first.Ip.String())
+
+	require.NoError(t, m.Recycle(firstLease))
+	secondLease, err := m.Allocate()
+	require.NoError(t, err)
+	second, err := NewNetResource(secondLease)
+	require.NoError(t, err)
+	require.NotZero(t, second.EndpointGeneration)
+	require.NotEqual(t, first.EndpointGeneration, second.EndpointGeneration)
+}
+
 func TestLoadRejectsActiveLegacyPooledVeth(t *testing.T) {
 	resource := (&NetResource{
 		Interface: &net.Interface{Name: config.PeerVethPrefix + "0a580002"},
@@ -588,13 +621,14 @@ func TestReleaseEphemeralDestroysInsteadOfRecycling(t *testing.T) {
 
 func TestLoadReservesIPForEphemeralPeerOutsideHostNamespace(t *testing.T) {
 	resource := (&NetResource{
-		Interface: &net.Interface{Name: config.PeerVethPrefix + "0a580002"},
-		Ip:        net.ParseIP("10.88.0.2"),
-		Mask:      net.CIDRMask(16, 32),
-		Gateway:   net.ParseIP("10.88.0.1"),
-		Type:      "bridge",
-		NetNSPath: "/var/run/netns/runc-sbox-recovered",
-		Lifecycle: InterfaceLifecycleEphemeral,
+		Interface:          &net.Interface{Name: config.PeerVethPrefix + "0a580002"},
+		Ip:                 net.ParseIP("10.88.0.2"),
+		Mask:               net.CIDRMask(16, 32),
+		Gateway:            net.ParseIP("10.88.0.1"),
+		Type:               "bridge",
+		NetNSPath:          "/var/run/netns/runc-sbox-recovered",
+		Lifecycle:          InterfaceLifecycleEphemeral,
+		EndpointGeneration: 42,
 	}).ToString()
 	m := &InterfaceManager{
 		IpRange:         "10.88.0.1/16",
@@ -613,6 +647,9 @@ func TestLoadReservesIPForEphemeralPeerOutsideHostNamespace(t *testing.T) {
 
 	require.NoError(t, m.load(ips))
 	assert.True(t, m.usingInterfaces.Has(resource))
+	recovered, err := NewNetResource(resource)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(42), recovered.EndpointGeneration)
 	assert.False(t, m.idleIp.Has("10.88.0.2"), "active runc IP must not become allocatable")
 	assert.True(t, m.idleIp.Has("10.88.0.3"))
 }

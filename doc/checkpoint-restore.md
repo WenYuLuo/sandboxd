@@ -76,6 +76,9 @@ checkpoint_info: {
 The caller must still provide the normal `Start` configuration, including the
 runtime, root filesystem, resources, mounts, and network settings. The target
 should use a new sandbox ID and receives newly allocated sandboxd resources.
+Consequently, a successful restored target receives its own bridge IP lease
+and a new endpoint generation in `StartResponse`; it never inherits the
+source sandbox's endpoint identity.
 
 If restore fails, sandboxd rolls back the partially created target. It does not
 modify the source or delete the checkpoint input. After `Start` succeeds, the

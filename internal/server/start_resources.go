@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 
+	runtime "github.com/inclusionAI/sandboxd/api/runtime/v1"
 	"github.com/inclusionAI/sandboxd/config"
 	"github.com/inclusionAI/sandboxd/pkg/networkmanager"
 	"github.com/inclusionAI/sandboxd/pkg/sandbox"
@@ -28,6 +29,21 @@ type preparedStartResources struct {
 	sandbox.OccupiedResource
 	sandboxIP string
 	network   *networkmanager.NetResource
+}
+
+func newStartSuccessResponse(
+	sandboxID string,
+	ports []string,
+	network *networkmanager.NetResource,
+) *runtime.StartResponse {
+	return &runtime.StartResponse{
+		Code:               0,
+		Message:            "Succeed",
+		ID:                 sandboxID,
+		Ports:              append([]string(nil), ports...),
+		BridgeIp:           network.Ip.String(),
+		EndpointGeneration: network.EndpointGeneration,
+	}
 }
 
 func (h *sandboxService) prepareStartResources(runtimeName, sandboxID string) (*preparedStartResources, error) {

@@ -1323,6 +1323,14 @@ func (h *sandboxService) Start(ctx context.Context, request *runtime.StartReques
 			ID:      "",
 		}, err
 	}
+	if preparedResources.network == nil || preparedResources.network.Ip.To4() == nil {
+		err := errors.New("allocated sandbox bridge endpoint has no IPv4 address")
+		return &runtime.StartResponse{Code: -1, Message: err.Error()}, err
+	}
+	if preparedResources.network.EndpointGeneration == 0 {
+		err := errors.New("allocated sandbox bridge endpoint has no generation")
+		return &runtime.StartResponse{Code: -1, Message: err.Error()}, err
+	}
 	var specUpdates *svc.SpecUpdates
 	if len(startReq.XpuAllocations) > 0 {
 		if h.xpuMgr == nil {
@@ -1491,11 +1499,7 @@ func (h *sandboxService) Start(ctx context.Context, request *runtime.StartReques
 		SandboxID: sandboxID,
 	})
 	startSucceeded = true
-	return &runtime.StartResponse{
-		Code:    0,
-		Message: "Succeed",
-		ID:      sandboxID,
-	}, nil
+	return newStartSuccessResponse(sandboxID, startReq.Ports, preparedResources.network), nil
 }
 
 func (h *sandboxService) Wait(ctx context.Context, request *runtime.WaitRequest) (*runtime.WaitResponse, error) {

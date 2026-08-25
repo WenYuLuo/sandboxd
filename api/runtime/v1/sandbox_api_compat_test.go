@@ -21,6 +21,7 @@ import (
 
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protodesc"
+	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
 // TestV010WireContract pins the public protobuf descriptor while allowing
@@ -33,8 +34,29 @@ func TestV010WireContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	sum := sha256.Sum256(wire)
-	const want = "f4ab97439feb72a68410e6243296a0c00c7856e7cbeae9870b9cebdffa060f0d"
+	const want = "207ecdc3dae0f843212db1d1ccb863562ce21b4cd8cb2eae14b7ecfa84162664"
 	if got := hex.EncodeToString(sum[:]); got != want {
 		t.Fatalf("sandbox API descriptor hash = %s, want %s", got, want)
+	}
+}
+
+func TestStartResponseEndpointFieldNumbers(t *testing.T) {
+	fields := File_api_runtime_v1_sandbox_api_proto.Messages().ByName("StartResponse").Fields()
+	tests := []struct {
+		name   protoreflect.Name
+		number protoreflect.FieldNumber
+	}{
+		{name: "ports", number: 4},
+		{name: "bridge_ip", number: 5},
+		{name: "endpoint_generation", number: 6},
+	}
+	for _, test := range tests {
+		field := fields.ByName(test.name)
+		if field == nil {
+			t.Fatalf("StartResponse.%s is missing", test.name)
+		}
+		if got := field.Number(); got != test.number {
+			t.Fatalf("StartResponse.%s field number = %d, want %d", test.name, got, test.number)
+		}
 	}
 }

@@ -71,6 +71,15 @@ sandboxes created by a pre-TAP release before upgrading. Runc deliberately
 keeps its independent one-shot netns and veth lifecycle and does not support
 network ACLs.
 
+Every allocation also assigns an unpredictable non-zero endpoint generation.
+`StartResponse` returns the sandbox bridge IP and this generation after the
+runtime, DNAT rules, filesystem state, and sandbox metadata have committed.
+The generation is serialized in the active network-resource lease and OCI
+annotations, so sandboxd restart recovery preserves it. Recycling the same
+TAP and IP for another sandbox allocation assigns a new generation. Callers
+can therefore distinguish a current endpoint from stale routing metadata even
+when the bridge IP is reused.
+
 ## Firecracker storage model
 
 Firecracker accepts only a regular file containing an EROFS superblock as its
