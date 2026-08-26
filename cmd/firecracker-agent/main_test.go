@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -150,6 +151,205 @@ func TestFirecrackerTmpfsParameters(t *testing.T) {
 	if _, _, err := firecrackerTmpfsParameters([]string{"bind"}); err == nil {
 		t.Fatal("accepted unsafe tmpfs option")
 	}
+}
+
+func TestCheckpointHandoff(t *testing.T) {
+	root := t.TempDir()
+	environment := []string{
+		"RUNTIME_ID=source",
+		"YR_SEED_FILE=/untrusted",
+		"YR_ENV_FILE=/untrusted",
+	}
+	handoff, err := prepareCheckpointHandoff(root, environment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer handoff.close()
+	initialEnvironment, err := os.ReadFile(handoff.environmentPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range environment {
+		if !bytes.Contains(initialEnvironment, []byte(entry+"\x00")) {
+			t.Fatalf("initial environment = %q, missing %q", initialEnvironment, entry)
+		}
+	}
+
+	for _, outcome := range []string{"resume", "error", "resume", "resume"} {
+		if err := handoff.signal(outcome); err != nil {
+			t.Fatalf("signal without reader: %v", err)
+		}
+	}
+
+	for _, outcome := range []string{"resume", "restore"} {
+		result := make(chan struct {
+			value string
+			err   error
+		}, 1)
+		go func() {
+			data, err := os.ReadFile(handoff.fifoPath)
+			result <- struct {
+				value string
+				err   error
+			}{string(data), err}
+		}()
+		waitForCheckpointReader(t, handoff)
+		if err := handoff.signal(outcome); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case read := <-result:
+			want := outcome + "\n"
+			if read.err != nil || read.value != want {
+				t.Fatalf("handoff = %q, %v, want %q", read.value, read.err, want)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("checkpoint handoff timed out")
+		}
+	}
+
+	if err := writeCheckpointEnvironment(
+		handoff.environmentPath,
+		[]string{"RUNTIME_ID=restore"},
+	); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(handoff.environmentPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(data, []byte("RUNTIME_ID=restore\x00")) ||
+		bytes.Contains(data, []byte("RUNTIME_ID=source")) {
+		t.Fatalf("restored environment = %q", data)
+	}
+}
+
+func TestCheckpointHandoffDeliversRestoreAfterReaderReopens(t *testing.T) {
+	handoff, err := prepareCheckpointHandoff(t.TempDir(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer handoff.close()
+
+	type readResult struct {
+		value string
+		err   error
+	}
+	read := func() <-chan readResult {
+		result := make(chan readResult, 1)
+		go func() {
+			data, err := os.ReadFile(handoff.fifoPath)
+			result <- readResult{value: string(data), err: err}
+		}()
+		return result
+	}
+
+	result := read()
+	waitForCheckpointReader(t, handoff)
+	if err := handoff.signal("resume"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-result:
+		if got.err != nil || got.value != "resume\n" {
+			t.Fatalf("initial handoff = %q, %v", got.value, got.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("initial handoff timed out")
+	}
+
+	if err := handoff.signal("restore"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-read():
+		if got.err != nil || got.value != "restore\n" {
+			t.Fatalf("pending restore handoff = %q, %v", got.value, got.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("restore was not delivered after the FIFO reader reopened")
+	}
+}
+
+func TestCheckpointHandoffRecreatesRemovedFIFO(t *testing.T) {
+	handoff, err := prepareCheckpointHandoff(t.TempDir(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer handoff.close()
+	if err := os.Remove(handoff.fifoPath); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		info, statErr := os.Stat(handoff.fifoPath)
+		if statErr == nil && info.Mode()&os.ModeNamedPipe != 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("checkpoint FIFO was not recreated: %v", statErr)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	result := make(chan struct {
+		value string
+		err   error
+	}, 1)
+	go func() {
+		data, err := os.ReadFile(handoff.fifoPath)
+		result <- struct {
+			value string
+			err   error
+		}{value: string(data), err: err}
+	}()
+	waitForCheckpointReader(t, handoff)
+	if err := handoff.signal("resume"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case read := <-result:
+		if read.err != nil || read.value != "resume\n" {
+			t.Fatalf("recreated checkpoint handoff = %q, %v", read.value, read.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("recreated checkpoint handoff timed out")
+	}
+}
+
+func TestCheckpointHandoffCloseWithoutReader(t *testing.T) {
+	handoff, err := prepareCheckpointHandoff(t.TempDir(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	closed := make(chan struct{})
+	go func() {
+		handoff.close()
+		close(closed)
+	}()
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("checkpoint handoff close blocked without a reader")
+	}
+	if err := handoff.signal("resume"); err != nil {
+		t.Fatalf("signal closed handoff: %v", err)
+	}
+}
+
+func waitForCheckpointReader(t *testing.T, handoff *checkpointHandoff) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		handoff.mu.Lock()
+		ready := handoff.reader != nil
+		handoff.mu.Unlock()
+		if ready {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("checkpoint handoff reader did not register")
 }
 
 type recordingWriteCloser struct {
