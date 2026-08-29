@@ -64,3 +64,32 @@ func TestFirecrackerCheckpointMemorySlotHonorsCancellation(t *testing.T) {
 	assert.NoError(t, err)
 	release()
 }
+
+func TestShouldRaiseFirecrackerCheckpointMemoryLimit(t *testing.T) {
+	tests := []struct {
+		name      string
+		live      int64
+		wantRaise bool
+		wantErr   bool
+	}{
+		{name: "normal", live: 320 << 20, wantRaise: true},
+		{name: "leftover expanded", live: 832 << 20},
+		{name: "unexpected", live: 576 << 20, wantErr: true},
+		{name: "unlimited or invalid", live: 0, wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			raise, err := shouldRaiseFirecrackerCheckpointMemoryLimit(
+				320<<20,
+				832<<20,
+				test.live,
+			)
+			if test.wantErr {
+				assert.Error(t, err)
+				return
+			}
+			assert.NoError(t, err)
+			assert.Equal(t, test.wantRaise, raise)
+		})
+	}
+}

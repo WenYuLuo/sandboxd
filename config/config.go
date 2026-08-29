@@ -163,6 +163,18 @@ type FirecrackerConfig struct {
 	DefaultVCPUCount        uint32 `toml:"default_vcpu_count" json:"defaultVCPUCount"`
 	DefaultMemoryMiB        uint32 `toml:"default_memory_mib" json:"defaultMemoryMiB"`
 	DefaultOverlaySizeBytes uint64 `toml:"default_overlay_size_bytes" json:"defaultOverlaySizeBytes"`
+	// ShrinkBeforeCheckpoint asks the guest agent to drop its page caches
+	// right before the checkpoint pause. Measured net-negative for read-hot
+	// workloads (dropped caches are re-materialized by block DMA and re-dirty
+	// the next window: snapshot phase 23-72ms without vs 130-143ms with on a
+	// continuous 512MiB re-read loop), and only helps long parks of
+	// cold-cache sandboxes. Default false.
+	ShrinkBeforeCheckpoint bool `toml:"shrink_before_checkpoint" json:"shrinkBeforeCheckpoint"`
+	// CheckpointMode selects the checkpoint algorithm Firecracker uses.
+	// "full" (the default, and the meaning of an unset value) writes every
+	// generation as a Full snapshot. "incremental" enables the three-tier
+	// chain against a VMM that supports Incremental and SoftDirty snapshots.
+	CheckpointMode string `toml:"checkpoint_mode" json:"checkpointMode"`
 }
 
 type ResourceConfig struct {

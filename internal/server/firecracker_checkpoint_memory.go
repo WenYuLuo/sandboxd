@@ -99,15 +99,39 @@ func (h *sandboxService) withTransientFirecrackerCheckpointMemory(
 	} else if guestResources != nil {
 		normalResources = proto.Clone(guestResources).(*runtime.LinuxSandboxResources)
 	}
-	headroom := int64(0)
-	if guestResources != nil {
-		headroom = firecrackerCheckpointHeadroom(guestResources.MemoryLimitInBytes)
+	if normalResources == nil || normalResources.MemoryLimitInBytes <= 0 {
+		return fmt.Errorf(
+			"Firecracker checkpoint needs the persisted guest memory limit for sandbox %s",
+			sandboxID,
+		)
 	}
-	if normalResources == nil || headroom == 0 {
-		return operation()
+	headroom := firecrackerCheckpointHeadroom(normalResources.MemoryLimitInBytes)
+	if headroom == 0 {
+		return fmt.Errorf(
+			"Firecracker checkpoint headroom is zero for sandbox %s (memory limit %d)",
+			sandboxID, normalResources.MemoryLimitInBytes,
+		)
 	}
 	expandedResources := proto.Clone(normalResources).(*runtime.LinuxSandboxResources)
 	addResourceMemory(expandedResources, headroom)
+	liveLimit, readErr := h.cgroupMgr.ReadMemoryLimit(cgroupPath)
+	if readErr != nil {
+		return fmt.Errorf(
+			"read Firecracker checkpoint cgroup memory limit for sandbox %s: %w",
+			sandboxID, readErr,
+		)
+	}
+	raiseLimit, err := shouldRaiseFirecrackerCheckpointMemoryLimit(
+		normalResources.MemoryLimitInBytes,
+		expandedResources.MemoryLimitInBytes,
+		liveLimit,
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"validate Firecracker checkpoint cgroup memory limit for sandbox %s: %w",
+			sandboxID, err,
+		)
+	}
 	releaseReservation, reserved := h.resourceMod.ReserveTransientMemory(
 		firecrackerCheckpointReservationOwner(sandboxID),
 		headroom,
@@ -118,9 +142,11 @@ func (h *sandboxService) withTransientFirecrackerCheckpointMemory(
 			headroom,
 		)
 	}
-	if err := h.cgroupMgr.Prepare(cgroupPath, expandedResources); err != nil {
-		releaseReservation()
-		return fmt.Errorf("raise Firecracker checkpoint cgroup memory limit: %w", err)
+	if raiseLimit {
+		if err := h.cgroupMgr.Prepare(cgroupPath, expandedResources); err != nil {
+			releaseReservation()
+			return fmt.Errorf("raise Firecracker checkpoint cgroup memory limit: %w", err)
+		}
 	}
 	operationErr := operation()
 	if err := h.cgroupMgr.Prepare(cgroupPath, normalResources); err == nil {
@@ -153,6 +179,33 @@ func (h *sandboxService) withTransientFirecrackerCheckpointMemory(
 				sandboxID,
 				deleteErr,
 			),
+		)
+	}
+}
+
+// shouldRaiseFirecrackerCheckpointMemoryLimit recognizes both the normal
+// steady-state limit and the exact expanded limit a previous daemon may have
+// left behind. Any other live value is ambiguous, so checkpoint fails closed
+// rather than compounding transient headroom or overwriting an external change.
+func shouldRaiseFirecrackerCheckpointMemoryLimit(
+	normalLimit int64,
+	expandedLimit int64,
+	liveLimit int64,
+) (bool, error) {
+	switch {
+	case normalLimit <= 0 || expandedLimit <= normalLimit:
+		return false, fmt.Errorf(
+			"invalid expected limits: normal=%d expanded=%d",
+			normalLimit, expandedLimit,
+		)
+	case liveLimit == normalLimit:
+		return true, nil
+	case liveLimit == expandedLimit:
+		return false, nil
+	default:
+		return false, fmt.Errorf(
+			"unexpected live limit %d; expected normal %d or expanded %d",
+			liveLimit, normalLimit, expandedLimit,
 		)
 	}
 }
