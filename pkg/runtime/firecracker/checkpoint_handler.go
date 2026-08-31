@@ -217,21 +217,34 @@ func (handler *Handler) Checkpoint(
 		return fmt.Errorf("snapshot Firecracker writable layer for %s: %w", sandboxID, err)
 	}
 	tOverlay := time.Now()
-	if err := api.createSnapshot(
-		ctx, files.State, files.Memory, snapshotType,
-	); err != nil {
+	snapshotAttempted := false
+	snapshotErr := handler.withCheckpointSnapshotMemoryCharge(
+		config.CgroupPath,
+		instance,
+		state,
+		func() error {
+			snapshotAttempted = true
+			return api.createSnapshot(
+				ctx, files.State, files.Memory, snapshotType,
+			)
+		},
+	)
+	if snapshotErr != nil {
 		// The VMM disarms its ledger on write failures, but not on every
 		// failure shape (a request can fail after the memory write already
 		// acked and re-armed, e.g. in the state write). The lineage must be
 		// treated as lost either way: the previous base is no longer
 		// provably the one the ledger tracks. No in-pause retry — the next
 		// checkpoint takes a Full snapshot through the normal path.
-		instance.markBaseMemoryLineageLost()
+		if snapshotAttempted {
+			instance.markBaseMemoryLineageLost()
+		}
 		discardUnsealedFirecrackerCheckpoint(files)
 		// The deferred handoff cleanup above resumes the guest and sends
-		// the error outcome; an explicit resume here would race with it.
+		// the error outcome if the VMM survived; an explicit resume here
+		// would race with it.
 		return fmt.Errorf("create Firecracker %s snapshot for %s: %w",
-			snapshotType, sandboxID, err)
+			snapshotType, sandboxID, snapshotErr)
 	}
 	// The snapshot succeeded: files.Memory is now the complete guest memory
 	// image and the baseline the Firecracker ledger tracks.
@@ -284,15 +297,7 @@ func (handler *Handler) Checkpoint(
 	if base != "" {
 		manifest.BaseMemory = filepath.Base(filepath.Dir(base))
 	}
-	// Digest the overlay only for Full snapshots (template manufacture):
-	// incremental generations are short-lived rolling artifacts whose
-	// overlay is a reflink of the live one, and hashing it costs ~5ms/MiB
-	// of CPU plus the same page cache re-read per generation. Their
-	// integrity rests on the reflink copy-on-write and Firecracker's own
-	// writes, the same rationale that excludes the memory file from the
-	// digests; restore skips components without a recorded digest.
-	digestOverlay := snapshotType == firecrackerSnapshotTypeFull
-	if err := finalizeFirecrackerCheckpointV2(ctx, files, manifest, digestOverlay); err != nil {
+	if err := finalizeFirecrackerCheckpointV2(ctx, files, manifest); err != nil {
 		instance.markBaseMemoryLineageLost()
 		discardUnsealedFirecrackerCheckpoint(files)
 		return errors.Join(resumeErr, fmt.Errorf(
@@ -309,6 +314,12 @@ func (handler *Handler) Checkpoint(
 		logrus.Warnf(
 			"firecracker: persist adopted base for %s failed (recovery forces a Full snapshot after the next daemon restart): %v",
 			sandboxID, err,
+		)
+	}
+	if !handler.checkpointWriteback.schedule(files.Memory) {
+		logrus.Warnf(
+			"firecracker: checkpoint memory writeback queue is full; skip %s",
+			files.Memory,
 		)
 	}
 
@@ -382,8 +393,8 @@ func resolveRequestedSnapshotType(mode, requested string) (string, error) {
 
 // selectFirecrackerSnapshotTier resolves how the next generation is taken.
 // An empty request leaves the automatic three-tier choice to the recorded
-// lineage: Incremental after a restore, SoftDirty windows afterwards, Full
-// when the lineage is lost or the guest memory size is unknown. An explicit
+// lineage: Full establishes the first baseline, Incremental follows a restore,
+// and SoftDirty windows follow a successful checkpoint. An explicit
 // request pins the snapshot type: Full drops the lineage for one generation
 // (Firecracker writes the whole memory file itself, so the layout
 // preallocates nothing), Incremental demands the pagemap base only a
@@ -417,7 +428,7 @@ func selectFirecrackerSnapshotTier(
 		// Automatic tier selection.
 		snapshotType = firecrackerSnapshotTypeSoftDirty
 		layoutMemorySize = memorySize
-		if memorySize <= 0 || lineageLost {
+		if memorySize <= 0 || base == "" || lineageLost {
 			snapshotType = firecrackerSnapshotTypeFull
 			if memorySize > 0 {
 				layoutMemorySize = 0
@@ -617,7 +628,10 @@ func instantiateFirecrackerCheckpoint(
 		}
 		files.State = artifact.Files.State
 		files.Memory = artifact.Files.Memory
-		if _, err := cloneFile(artifact.Files.Overlay, files.Overlay); err != nil {
+		// The cloned overlay is a live runtime file, not a durable artifact.
+		// FICLONE makes it immediately usable by Firecracker; syncing here can
+		// force unrelated deferred checkpoint writeback onto restore latency.
+		if _, err := cloneFileNoSync(artifact.Files.Overlay, files.Overlay); err != nil {
 			return files, 0, fmt.Errorf("instantiate Firecracker writable layer: %w", err)
 		}
 		if err := checkRestoredMemorySize(artifact.Manifest.MemorySize); err != nil {
