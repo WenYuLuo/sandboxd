@@ -77,6 +77,12 @@ Select the backend with `plugin.network.nat_backend`. See the
 [bpfnat implementation notes](bpf/bpfnat/README.md) for its host prerequisites
 and build workflow.
 
+Sandboxd owns TAP devices in the host network namespace whose names use its
+`tap.<encoded-ip>` format and decode to an address within
+`plugin.network.ip_range`. Startup recovery may reattach, reconfigure, and
+reuse those devices. Other software must not create TAP devices in this
+reserved namespace.
+
 An optional per-sandbox ACL uses native netfilter and ipset with the `iptables`
 backend and TC eBPF with the `bpfnat` backend. Both support prioritized
 stateful IPv4 CIDR, domain, protocol, and port rules, fragments, and managed

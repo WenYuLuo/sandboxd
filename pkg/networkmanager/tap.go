@@ -21,6 +21,7 @@ import (
 	"net"
 
 	"github.com/inclusionAI/sandboxd/internal/util"
+	"github.com/sirupsen/logrus"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 )
@@ -183,23 +184,43 @@ func (m *InterfaceManager) setTapState(resource *NetResource, up bool) error {
 			expectedName,
 		)
 	}
-	link, err := netlink.LinkByName(expectedName)
+	link, err := m.links().LinkByName(expectedName)
 	if err != nil {
 		return fmt.Errorf("find pooled TAP %s: %w", expectedName, err)
 	}
 	if link.Type() != "tuntap" {
 		return fmt.Errorf("pooled endpoint %s has type %q, want tuntap", expectedName, link.Type())
 	}
-	if m.bridgeLink == nil || link.Attrs().MasterIndex != m.bridgeLink.Attrs().Index {
-		return fmt.Errorf("pooled TAP %s is not attached to %s", expectedName, BridgeName)
+	// Host-side drift (stale bridge attach, host MAC randomised by an
+	// unclean predecessor or foreign tooling) is repaired in place instead of
+	// failing the allocation or daemon recovery: the endpoint identity is
+	// fully determined by its name, so re-stamping the deterministic
+	// attributes can only converge it back to the expected state. Identity
+	// violations (wrong type above, wrong name earlier) stay hard errors.
+	if m.bridgeLink == nil {
+		return fmt.Errorf("pooled TAP %s has no %s to attach to", expectedName, BridgeName)
+	}
+	if link.Attrs().MasterIndex != m.bridgeLink.Attrs().Index {
+		if err := m.links().LinkSetMaster(link, m.bridgeLink); err != nil {
+			return fmt.Errorf(
+				"reattach pooled TAP %s to %s: %w", expectedName, BridgeName, err,
+			)
+		}
+		logrus.Warnf(
+			"networkmanager: repaired pooled TAP %s bridge attach (was not on %s)",
+			expectedName, BridgeName,
+		)
 	}
 	expectedHostMAC, _ := tapHostMAC(ip4)
 	if !bytes.Equal(link.Attrs().HardwareAddr, expectedHostMAC) {
-		return fmt.Errorf(
-			"pooled TAP %s host MAC is %s, want %s",
-			expectedName,
-			link.Attrs().HardwareAddr,
-			expectedHostMAC,
+		if err := m.links().LinkSetHardwareAddr(link, expectedHostMAC); err != nil {
+			return fmt.Errorf(
+				"restore pooled TAP %s host MAC to %s: %w", expectedName, expectedHostMAC, err,
+			)
+		}
+		logrus.Warnf(
+			"networkmanager: repaired pooled TAP %s host MAC %s -> %s",
+			expectedName, link.Attrs().HardwareAddr, expectedHostMAC,
 		)
 	}
 	expectedGuestMAC, _ := tapGuestMAC(ip4)
@@ -212,20 +233,26 @@ func (m *InterfaceManager) setTapState(resource *NetResource, up bool) error {
 		)
 	}
 	if resource.Interface.Index != 0 && resource.Interface.Index != link.Attrs().Index {
-		return fmt.Errorf(
-			"pooled TAP %s index is %d, lease records %d",
-			expectedName,
-			link.Attrs().Index,
-			resource.Interface.Index,
+		// The kernel ifindex is bookkeeping, not identity (it changes whenever
+		// the device is recreated). This refresh only runs on consumer-less
+		// paths — a lease being (re)handed out by markUsing or returned by
+		// Recycle — where the refreshed serialization becomes the string the
+		// caller persists and later releases, so records and external holders
+		// stay consistent. Recovery of an ACTIVE lease whose device was
+		// replaced externally is rejected by load() before this point.
+		logrus.Warnf(
+			"networkmanager: pooled TAP %s index drifted (%d, lease records %d); refreshing lease",
+			expectedName, link.Attrs().Index, resource.Interface.Index,
 		)
+		resource.Interface.Index = link.Attrs().Index
 	}
 	if up {
-		if err := netlink.LinkSetUp(link); err != nil {
+		if err := m.links().LinkSetUp(link); err != nil {
 			return fmt.Errorf("activate pooled TAP %s: %w", expectedName, err)
 		}
 		return nil
 	}
-	if err := netlink.LinkSetDown(link); err != nil {
+	if err := m.links().LinkSetDown(link); err != nil {
 		return fmt.Errorf("deactivate pooled TAP %s: %w", expectedName, err)
 	}
 	return nil
