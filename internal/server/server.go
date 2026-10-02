@@ -1085,17 +1085,31 @@ type resourcePrepareResult struct {
 	err       error
 }
 
-func (h *sandboxService) Start(ctx context.Context, request *runtime.StartRequest) (*runtime.StartResponse, error) {
-	response, err := h.startSandbox(ctx, request)
-	if err != nil {
-		// startSandbox has returned, including deferred rollback. The trailer
-		// settles the operation, but clients must still confirm backend absence.
+type startProgress struct {
+	runtimeAttempted bool
+}
+
+// finishStart settles failures rejected before execution. Once a runtime has
+// been invoked, its asynchronous work may outlive an RPC error; returning from
+// the Go handler alone is insufficient proof that no backend can appear later.
+func finishStart(ctx context.Context, execute func(*startProgress) (*runtime.StartResponse, error)) (*runtime.StartResponse, error) {
+	progress := &startProgress{}
+	response, err := execute(progress)
+	if err != nil && !progress.runtimeAttempted {
+		// execute has returned, including its deferred rollback. Consumers still
+		// reconcile remaining backends before releasing admission resources.
 		_ = grpc.SetTrailer(ctx, metadata.Pairs("sandboxd-start-settled", "true"))
 	}
 	return response, err
 }
 
-func (h *sandboxService) startSandbox(ctx context.Context, request *runtime.StartRequest) (*runtime.StartResponse, error) {
+func (h *sandboxService) Start(ctx context.Context, request *runtime.StartRequest) (*runtime.StartResponse, error) {
+	return finishStart(ctx, func(progress *startProgress) (*runtime.StartResponse, error) {
+		return h.startSandbox(ctx, request, progress)
+	})
+}
+
+func (h *sandboxService) startSandbox(ctx context.Context, request *runtime.StartRequest, progress *startProgress) (*runtime.StartResponse, error) {
 	if request == nil {
 		err := fmt.Errorf("start request is nil")
 		return &runtime.StartResponse{Code: -1, Message: err.Error()}, err
@@ -1525,6 +1539,7 @@ func (h *sandboxService) startSandbox(ctx context.Context, request *runtime.Star
 		EnableKVM:               extraConfig.EnableKVM,
 		CheckpointDir:           checkpointDir,
 	}
+	progress.runtimeAttempted = true
 	if err := h.startSandboxRuntime(ctx, startReq.Runtime, runtimeConfig); err != nil {
 		return &runtime.StartResponse{
 			Code:    -1,

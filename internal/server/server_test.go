@@ -993,3 +993,28 @@ func TestShutdownPreservesSandboxForDaemonRestart(t *testing.T) {
 	assert.NoError(t, err, "metadata must survive for restart reconciliation")
 	assert.False(t, service.Ready())
 }
+
+func TestStartRuntimeFailureDoesNotCarrySettledTrailer(t *testing.T) {
+	stream := &startTrailerStream{}
+	ctx := grpc.NewContextWithServerTransportStream(context.Background(), stream)
+	_, err := finishStart(ctx, func(progress *startProgress) (*runtime.StartResponse, error) {
+		progress.runtimeAttempted = true
+		return nil, status.Error(codes.Unknown, "runtime may still be executing")
+	})
+	assert.Error(t, err)
+	assert.Empty(t, stream.trailer.Get("sandboxd-start-settled"))
+}
+
+func TestStartSettledTrailerWaitsForRollback(t *testing.T) {
+	stream := &startTrailerStream{}
+	ctx := grpc.NewContextWithServerTransportStream(context.Background(), stream)
+	rollbackReturned := false
+	_, err := finishStart(ctx, func(*startProgress) (*runtime.StartResponse, error) {
+		defer func() { rollbackReturned = true }()
+		assert.Empty(t, stream.trailer.Get("sandboxd-start-settled"))
+		return nil, status.Error(codes.Unknown, "capacity rejected")
+	})
+	assert.Error(t, err)
+	assert.True(t, rollbackReturned)
+	assert.Equal(t, []string{"true"}, stream.trailer.Get("sandboxd-start-settled"))
+}
