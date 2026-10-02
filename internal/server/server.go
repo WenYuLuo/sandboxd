@@ -55,6 +55,7 @@ import (
 	"github.com/sirupsen/logrus"
 	"golang.org/x/sync/singleflight"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -477,20 +478,19 @@ func (h *sandboxService) Run() error {
 }
 
 func (h *sandboxService) Shutdown() {
-	logrus.Info("sandbox service shutting down: cleaning up sandboxes")
-
-	// 1. Force-delete all running sandboxes with per-sandbox timeout.
-	sandboxes := h.sandboxManager.List()
-	for _, c := range sandboxes {
-		if c == nil || c.Metadata == nil {
-			continue
+	h.ready.Store(false)
+	h.sandboxManager.Stop()
+	if count := len(h.sandboxManager.List()); count > 0 {
+		// A daemon restart must preserve externally managed workloads and their
+		// pinned networking, cgroups and filesystem mounts. Persistent records
+		// are updated during normal operations and recovered by the next daemon.
+		if h.resourceMod != nil {
+			h.resourceMod.Stop()
 		}
-		id := c.Metadata.ID
-		if err := h.deleteSandbox(context.Background(), id); err != nil {
-			logrus.Warnf("shutdown: failed to delete sandbox %s: %v", id, err)
-		}
-
+		logrus.Infof("sandbox service stopped; preserving %d sandboxes for restart", count)
+		return
 	}
+	logrus.Info("sandbox service shutting down: releasing unused infrastructure")
 
 	h.fsMgr.Shutdown()
 
@@ -1086,6 +1086,16 @@ type resourcePrepareResult struct {
 }
 
 func (h *sandboxService) Start(ctx context.Context, request *runtime.StartRequest) (*runtime.StartResponse, error) {
+	response, err := h.startSandbox(ctx, request)
+	if err != nil {
+		// startSandbox has returned, including deferred rollback. The trailer
+		// settles the operation, but clients must still confirm backend absence.
+		_ = grpc.SetTrailer(ctx, metadata.Pairs("sandboxd-start-settled", "true"))
+	}
+	return response, err
+}
+
+func (h *sandboxService) startSandbox(ctx context.Context, request *runtime.StartRequest) (*runtime.StartResponse, error) {
 	if request == nil {
 		err := fmt.Errorf("start request is nil")
 		return &runtime.StartResponse{Code: -1, Message: err.Error()}, err

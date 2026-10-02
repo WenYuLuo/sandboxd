@@ -36,7 +36,9 @@ import (
 	"github.com/inclusionAI/sandboxd/pkg/volumemanager"
 	cmap "github.com/orcaman/concurrent-map/v2"
 	"github.com/stretchr/testify/assert"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 )
 
@@ -956,4 +958,38 @@ func TestSetupDnatRules_MultipleContainers(t *testing.T) {
 	s.networkMgr.cleanupDnatRules("ctr-1")
 	assert.Empty(t, s.networkMgr.rulesFor("ctr-1"))
 	assert.NotEmpty(t, s.networkMgr.rulesFor("ctr-2"))
+}
+
+// The marker promises handler completion, not absence of a leftover runtime.
+// Consumers must still reconcile and verify deletion before releasing resources.
+type startTrailerStream struct{ trailer metadata.MD }
+
+func (s *startTrailerStream) Method() string               { return "/runtime.v1.SandboxService/Start" }
+func (s *startTrailerStream) SetHeader(metadata.MD) error  { return nil }
+func (s *startTrailerStream) SendHeader(metadata.MD) error { return nil }
+func (s *startTrailerStream) SetTrailer(md metadata.MD) error {
+	s.trailer = metadata.Join(s.trailer, md)
+	return nil
+}
+
+func TestStartFailureCarriesSettledTrailer(t *testing.T) {
+	service := newTestService(t, nil)
+	defer service.sandboxManager.Stop()
+	stream := &startTrailerStream{}
+	ctx := grpc.NewContextWithServerTransportStream(context.Background(), stream)
+	_, err := service.Start(ctx, nil)
+	assert.Error(t, err)
+	assert.Equal(t, []string{"true"}, stream.trailer.Get("sandboxd-start-settled"))
+}
+
+func TestShutdownPreservesSandboxForDaemonRestart(t *testing.T) {
+	handler := &recordingDeleteHandler{FakeRuntimeHandler: svc.NewFakeRuntimeHandler()}
+	service := newTestService(t, map[string]svc.Handler{"runsc": handler})
+	const id = "sbox-daemon-restart"
+	storeSandboxForDelete(t, service, id)
+	service.Shutdown()
+	assert.Equal(t, 0, handler.calls, "daemon shutdown must not delete workload")
+	_, err := service.sandboxManager.Get(id)
+	assert.NoError(t, err, "metadata must survive for restart reconciliation")
+	assert.False(t, service.Ready())
 }
