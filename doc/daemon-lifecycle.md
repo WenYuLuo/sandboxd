@@ -6,6 +6,8 @@ A failed Start may include the gRPC trailer `sandboxd-start-settled: true`. The 
 
 An empty object prefix is valid for an object at the bucket root. Explicit endpoint and bucket values therefore override the object storage template even when ObjectPrefix is empty. Object storage signature compatibility is separate from local HTTP HEAD/Range verification.
 
+If a runtime Start or Restore was attempted and the operation fails, rollback calls the runtime Delete with a fresh, bounded cleanup context, including when the runtime call itself returned an error. The bundle remains available until Delete succeeds and the runtime inventory confirms absence. A Delete failure, inventory failure or remaining backend quarantines the startup leases and bundle instead of returning their network/filesystem/resources to the idle pools. These failures still do not emit a settled trailer: final client outcome reconciliation and automatic reclamation of quarantined, unregistered startup state remain follow-up work. A daemon restart is not established here as proof that every quarantined lease is recovered.
+
 ## Kata PTY mounts
 
 Before rootfs preparation, the Kata handler adds a `devpts` mount at `/dev/pts` to the serialized OCI bundle when none exists. The mount uses a private `newinstance` with `ptmxmode=0666`, so the guest's `/dev/ptmx` link can resolve to `/dev/pts/ptmx`. An explicitly configured devpts mount retains its options; a conflicting mount type is rejected before starting the shim.

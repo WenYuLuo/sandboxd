@@ -1018,3 +1018,101 @@ func TestStartSettledTrailerWaitsForRollback(t *testing.T) {
 	assert.True(t, rollbackReturned)
 	assert.Equal(t, []string{"true"}, stream.trailer.Get("sandboxd-start-settled"))
 }
+
+type failedStartCleanupHandler struct {
+	*svc.FakeRuntimeHandler
+	deleteErr        error
+	deleteCalls      int
+	deleteContextErr error
+	listErr          error
+	states           []*svc.State
+}
+
+func (h *failedStartCleanupHandler) Start(context.Context, svc.StartConfig) error {
+	return status.Error(codes.Unknown, "runtime failed after creating partial state")
+}
+
+func (h *failedStartCleanupHandler) Delete(ctx context.Context, _ string) error {
+	h.deleteCalls++
+	h.deleteContextErr = ctx.Err()
+	return h.deleteErr
+}
+
+func (h *failedStartCleanupHandler) List(context.Context) ([]*svc.State, error) {
+	return h.states, h.listErr
+}
+
+func TestFailedRuntimeStartRetainsRootForCleanup(t *testing.T) {
+	handler := &failedStartCleanupHandler{FakeRuntimeHandler: svc.NewFakeRuntimeHandler()}
+	service := newTestService(t, map[string]svc.Handler{"runsc": handler})
+	defer service.sandboxManager.Stop()
+	const id = "sbox-partial-start"
+	root := filepath.Join(service.config.RootDir, "containers", id)
+	assert.NoError(t, os.MkdirAll(root, 0755))
+	marker := filepath.Join(root, "partial-runtime-state")
+	assert.NoError(t, os.WriteFile(marker, []byte("needed by runtime delete"), 0600))
+	err := service.startSandboxRuntime(context.Background(), "runsc", svc.StartConfig{ID: id})
+	assert.Error(t, err)
+	assert.FileExists(t, marker, "failed Start must preserve state needed by Delete")
+}
+
+func TestRuntimeRollbackDoesNotReuseCanceledStartContext(t *testing.T) {
+	handler := &failedStartCleanupHandler{FakeRuntimeHandler: svc.NewFakeRuntimeHandler()}
+	service := newTestService(t, map[string]svc.Handler{"runsc": handler})
+	defer service.sandboxManager.Stop()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	assert.Error(t, ctx.Err())
+	assert.NoError(t, service.rollbackRuntimeAttempt("runsc", "sbox-partial-start"))
+	assert.Equal(t, 1, handler.deleteCalls)
+	assert.NoError(t, handler.deleteContextErr)
+}
+
+func TestRuntimeRollbackRetainsRootWhenDeleteFails(t *testing.T) {
+	handler := &failedStartCleanupHandler{
+		FakeRuntimeHandler: svc.NewFakeRuntimeHandler(),
+		deleteErr:          status.Error(codes.Unavailable, "runtime still active"),
+	}
+	service := newTestService(t, map[string]svc.Handler{"runsc": handler})
+	defer service.sandboxManager.Stop()
+	const id = "sbox-partial-start"
+	root := filepath.Join(service.config.RootDir, "containers", id)
+	assert.NoError(t, os.MkdirAll(root, 0755))
+	marker := filepath.Join(root, "partial-runtime-state")
+	assert.NoError(t, os.WriteFile(marker, []byte("needed for retry"), 0600))
+	assert.Error(t, service.rollbackRuntimeAttempt("runsc", id))
+	assert.Equal(t, 1, handler.deleteCalls)
+	assert.FileExists(t, marker)
+}
+
+func TestRuntimeRollbackRetainsRootUntilAbsenceConfirmed(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		listErr error
+		states  []*svc.State
+	}{
+		{name: "list unavailable", listErr: status.Error(codes.Unavailable, "inventory unavailable")},
+		{name: "backend still present", states: []*svc.State{{ID: "sbox-partial-start"}}},
+		{name: "malformed inventory", states: []*svc.State{nil}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			handler := &failedStartCleanupHandler{FakeRuntimeHandler: svc.NewFakeRuntimeHandler(), listErr: test.listErr, states: test.states}
+			service := newTestService(t, map[string]svc.Handler{"runsc": handler})
+			defer service.sandboxManager.Stop()
+			root := filepath.Join(service.config.RootDir, "containers", "sbox-partial-start")
+			assert.NoError(t, os.MkdirAll(root, 0755))
+			assert.Error(t, service.rollbackRuntimeAttempt("runsc", "sbox-partial-start"))
+			assert.DirExists(t, root)
+		})
+	}
+}
+
+func TestRuntimeRollbackRemovesRootAfterConfirmedDelete(t *testing.T) {
+	handler := &failedStartCleanupHandler{FakeRuntimeHandler: svc.NewFakeRuntimeHandler()}
+	service := newTestService(t, map[string]svc.Handler{"runsc": handler})
+	defer service.sandboxManager.Stop()
+	root := filepath.Join(service.config.RootDir, "containers", "sbox-partial-start")
+	assert.NoError(t, os.MkdirAll(root, 0755))
+	assert.NoError(t, service.rollbackRuntimeAttempt("runsc", "sbox-partial-start"))
+	assert.NoDirExists(t, root)
+}
