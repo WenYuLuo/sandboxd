@@ -28,6 +28,18 @@ import (
 	"github.com/inclusionAI/sandboxd/internal/util"
 )
 
+// commandFailure classifies only diagnostics from a completed runc process.
+// Launch, context and filesystem errors must never look like container absence.
+type commandFailure struct {
+	cause   error
+	detail  string
+	missing bool
+	stopped bool
+}
+
+func (e *commandFailure) Error() string { return e.cause.Error() + ": " + e.detail }
+func (e *commandFailure) Unwrap() error { return e.cause }
+
 // State is the stable subset of `runc list --format json` used by sandboxd.
 type State struct {
 	ID      string `json:"id"`
@@ -65,10 +77,22 @@ func (c *Client) command(ctx context.Context, args ...string) ([]byte, error) {
 	if output := strings.TrimSpace(stderr.String()); output != "" {
 		details = append(details, output)
 	}
+	if ctx.Err() != nil {
+		return stdout.Bytes(), errors.Join(ctx.Err(), err)
+	}
 	if len(details) == 0 {
 		return stdout.Bytes(), err
 	}
-	return stdout.Bytes(), fmt.Errorf("%w: %s", err, strings.Join(details, "\n"))
+	detail := strings.Join(details, "\n")
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		return stdout.Bytes(), fmt.Errorf("%w: %s", err, detail)
+	}
+	message := strings.ToLower(detail)
+	missing := strings.Contains(message, "container does not exist")
+	stopped := missing || strings.Contains(message, "container is not running") ||
+		strings.Contains(message, "container is stopped") || strings.Contains(message, "container not running")
+	return stdout.Bytes(), &commandFailure{cause: err, detail: detail, missing: missing, stopped: stopped}
 }
 
 func (c *Client) List(ctx context.Context) ([]State, error) {
@@ -145,25 +169,14 @@ func (c *Client) Delete(ctx context.Context, id string, force bool) error {
 
 // IsNotFound reports the stable class of errors produced for missing state.
 func IsNotFound(err error) bool {
-	if err == nil {
-		return false
-	}
-	message := strings.ToLower(err.Error())
-	return strings.Contains(message, "does not exist") ||
-		strings.Contains(message, "not found") ||
-		strings.Contains(message, "no such file")
+	var failure *commandFailure
+	return errors.As(err, &failure) && failure.missing
 }
 
-// IsNotRunning reports errors that are safe when converging a delete.
+// IsNotRunning reports a confirmed stopped or missing container.
 func IsNotRunning(err error) bool {
-	if err == nil {
-		return false
-	}
-	message := strings.ToLower(err.Error())
-	return IsNotFound(err) ||
-		strings.Contains(message, "not running") ||
-		strings.Contains(message, "container is stopped") ||
-		strings.Contains(message, "container not running")
+	var failure *commandFailure
+	return errors.As(err, &failure) && failure.stopped
 }
 
 // IgnoreMissing turns idempotent absence into success.

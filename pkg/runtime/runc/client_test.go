@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -66,9 +67,9 @@ func TestClientIncludesRuntimeFailureDetail(t *testing.T) {
 }
 
 func TestRuncErrorClassification(t *testing.T) {
-	assert.True(t, IsNotFound(errors.New("container does not exist")))
-	assert.True(t, IsNotRunning(errors.New("container is stopped")))
-	assert.NoError(t, IgnoreMissing(errors.New("not found")))
+	assert.False(t, IsNotFound(errors.New("container does not exist")))
+	assert.False(t, IsNotRunning(errors.New("container is stopped")))
+	assert.Error(t, IgnoreMissing(errors.New("not found")))
 	assert.Error(t, IgnoreMissing(assert.AnError))
 }
 
@@ -133,4 +134,65 @@ func TestClientDeleteCannotReclaimStateWithoutRuntimeConfirmation(t *testing.T) 
 
 	require.Error(t, client.Delete(context.Background(), "sbox-expired", true))
 	assert.DirExists(t, state)
+}
+
+func TestUnconfirmedRuntimeErrorsAreNeverMissing(t *testing.T) {
+	for _, message := range []string{"container does not exist", "not found", "open state.json: no such file or directory"} {
+		err := errors.New(message)
+		assert.False(t, IsNotFound(err))
+		assert.False(t, IsNotRunning(err))
+		assert.ErrorIs(t, IgnoreMissing(err), err)
+	}
+}
+
+func TestRuntimeFailureClassificationRequiresConfirmedContainerStatus(t *testing.T) {
+	for _, tc := range []struct {
+		message          string
+		missing, stopped bool
+	}{
+		{"container does not exist", true, true},
+		{"container is not running", false, true},
+		{"open config.json: no such file or directory", false, false},
+		{"dependency not found", false, false},
+	} {
+		t.Run(tc.message, func(t *testing.T) {
+			binary := filepath.Join(t.TempDir(), "runc")
+			require.NoError(t, os.WriteFile(binary, []byte("#!/bin/sh\necho '"+tc.message+"' >&2\nexit 1\n"), 0755))
+			_, err := NewClient(binary, t.TempDir()).State(context.Background(), "sbox-test")
+			require.Error(t, err)
+			assert.Equal(t, tc.missing, IsNotFound(err))
+			assert.Equal(t, tc.stopped, IsNotRunning(err))
+		})
+	}
+}
+
+func TestClientDeletePreservesStateOnNonContainerENOENT(t *testing.T) {
+	root := t.TempDir()
+	state := filepath.Join(root, "sbox-ordinary")
+	require.NoError(t, os.Mkdir(state, 0700))
+	binary := filepath.Join(t.TempDir(), "runc")
+	require.NoError(t, os.WriteFile(binary, []byte("#!/bin/sh\necho 'open config.json: no such file or directory' >&2\nexit 1\n"), 0755))
+	require.Error(t, NewClient(binary, root).Delete(context.Background(), "sbox-ordinary", true))
+	assert.DirExists(t, state)
+}
+
+func TestRuntimeContextErrorsRemainVisible(t *testing.T) {
+	binary := filepath.Join(t.TempDir(), "runc")
+	require.NoError(t, os.WriteFile(binary, []byte("#!/bin/sh\nexec sleep 30\n"), 0755))
+	for _, deadline := range []bool{false, true} {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+		if !deadline {
+			cancel()
+		}
+		_, err := NewClient(binary, t.TempDir()).State(ctx, "sbox-test")
+		cancel()
+		require.Error(t, err)
+		if deadline {
+			assert.ErrorIs(t, err, context.DeadlineExceeded)
+		} else {
+			assert.ErrorIs(t, err, context.Canceled)
+		}
+		assert.False(t, IsNotFound(err))
+		assert.Error(t, IgnoreMissing(err))
+	}
 }
