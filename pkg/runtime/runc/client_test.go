@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -194,5 +195,68 @@ func TestRuntimeContextErrorsRemainVisible(t *testing.T) {
 		}
 		assert.False(t, IsNotFound(err))
 		assert.Error(t, IgnoreMissing(err))
+	}
+}
+
+func TestRuntimeStatusDiagnosticBoundaries(t *testing.T) {
+	for _, tc := range []struct {
+		name, stdout, stderr string
+		missing, stopped     bool
+	}{
+		{name: "bare missing", stderr: "container does not exist", missing: true, stopped: true},
+		{name: "bare stopped", stderr: "container is stopped", stopped: true},
+		{name: "bare not running", stderr: "container not running", stopped: true},
+		{name: "log missing", stderr: `time="2026-10-15T12:00:00+08:00" level=error msg="container does not exist"`, missing: true, stopped: true},
+		{name: "log stopped", stderr: `time="2026-10-15T12:00:00+08:00" level=error msg="container is not running"`, stopped: true},
+		{name: "json missing", stderr: `{"level":"error","msg":"container does not exist"}`, missing: true, stopped: true},
+		{name: "path missing", stderr: "open /tmp/container does not exist/sbox/state.json: not a directory"},
+		{name: "quoted path", stderr: `open "/tmp/container does not exist/state.json": permission denied`},
+		{name: "path stopped", stderr: "open /tmp/container is stopped/state.json: not a directory"},
+		{name: "logged path", stderr: `time="2026-10-15T12:00:00+08:00" level=error msg="open /tmp/container does not exist/sbox/state.json: not a directory"`},
+		{name: "json path", stderr: `{"level":"error","msg":"open /tmp/container does not exist/state.json: not a directory"}`},
+		{name: "warning", stderr: `time="2026-10-15T12:00:00+08:00" level=warning msg="container does not exist"`},
+		{name: "stdout status", stdout: "container does not exist", stderr: "permission denied"},
+		{name: "extra output", stdout: "open state.json: permission denied", stderr: "container does not exist"},
+		{name: "extra diagnostic", stderr: "container does not exist\nopen state.json: permission denied"},
+		{name: "quoted message", stderr: `time="2026-10-15T12:00:00+08:00" level=error msg="open \"container does not exist\": not a directory"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			binary := filepath.Join(t.TempDir(), "runc")
+			script := "#!/bin/sh\ncat <<'STDOUT'\n" + tc.stdout + "\nSTDOUT\ncat >&2 <<'STDERR'\n" + tc.stderr + "\nSTDERR\nexit 1\n"
+			require.NoError(t, os.WriteFile(binary, []byte(script), 0755))
+			_, err := NewClient(binary, t.TempDir()).State(context.Background(), "sbox-test")
+			require.Error(t, err)
+			assert.Equal(t, tc.missing, IsNotFound(err))
+			assert.Equal(t, tc.stopped, IsNotRunning(err))
+		})
+	}
+}
+
+func TestClientDeleteRetainsEmptyStateOnAmbiguousFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name, script string
+		signaled     bool
+	}{
+		{"signal", "#!/bin/sh\necho 'container does not exist' >&2\nkill -TERM $$\n", true},
+		{"filesystem path", "#!/bin/sh\necho 'open /tmp/container does not exist/sbox/state.json: not a directory' >&2\nexit 1\n", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			state := filepath.Join(root, "sbox-test")
+			require.NoError(t, os.Mkdir(state, 0700))
+			binary := filepath.Join(t.TempDir(), "runc")
+			require.NoError(t, os.WriteFile(binary, []byte(tc.script), 0755))
+			client := NewClient(binary, root)
+			_, err := client.State(context.Background(), "sbox-test")
+			require.Error(t, err)
+			var exitErr *exec.ExitError
+			require.ErrorAs(t, err, &exitErr)
+			assert.Equal(t, !tc.signaled, exitErr.ProcessState.Exited())
+			assert.False(t, IsNotFound(err))
+			assert.False(t, IsNotRunning(err))
+			err = client.Delete(context.Background(), "sbox-test", true)
+			require.Error(t, err)
+			assert.DirExists(t, state)
+		})
 	}
 }

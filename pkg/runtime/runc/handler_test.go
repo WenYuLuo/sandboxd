@@ -245,6 +245,41 @@ func TestRuncDeleteFailureRetainsRuntimeFiles(t *testing.T) {
 	}
 }
 
+func TestRuncDeleteAmbiguousDiagnosticRetainsRuntimeFiles(t *testing.T) {
+	for _, script := range []string{
+		"#!/bin/sh\necho 'container does not exist' >&2\nkill -TERM $$\n",
+		"#!/bin/sh\necho 'open /tmp/container does not exist/sbox/state.json: not a directory' >&2\nexit 1\n",
+	} {
+		t.Run(script, func(t *testing.T) {
+			const id = "sbox-retained"
+			root, storage, stateRoot := t.TempDir(), t.TempDir(), t.TempDir()
+			bundle := filepath.Join(root, id)
+			state := filepath.Join(stateRoot, id)
+			require.NoError(t, os.Mkdir(state, 0700))
+			markers := []string{filepath.Join(bundle, "rootfs", "data"), filepath.Join(storage, id, "private-data")}
+			for _, name := range markers {
+				require.NoError(t, os.MkdirAll(filepath.Dir(name), 0700))
+				require.NoError(t, os.WriteFile(name, []byte("keep"), 0600))
+			}
+			binary := filepath.Join(t.TempDir(), "runc")
+			require.NoError(t, os.WriteFile(binary, []byte(script), 0755))
+			oldUnmount := unmountRuncPath
+			touched := false
+			unmountRuncPath = func(string) error { touched = true; return nil }
+			defer func() { unmountRuncPath = oldUnmount }()
+			handler := &Handler{client: NewClient(binary, stateRoot), sandboxRoot: root, storageRoot: storage}
+			require.Error(t, handler.Delete(context.Background(), id))
+			assert.False(t, touched)
+			assert.DirExists(t, state)
+			for _, name := range markers {
+				data, err := os.ReadFile(name)
+				require.NoError(t, err)
+				assert.Equal(t, "keep", string(data))
+			}
+		})
+	}
+}
+
 func TestRuncOrphanDeleteFailureRetainsPrivateStorage(t *testing.T) {
 	const id = "sbox-orphan"
 	root, storage := t.TempDir(), t.TempDir()

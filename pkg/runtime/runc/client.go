@@ -23,12 +23,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/inclusionAI/sandboxd/internal/util"
 )
 
-// commandFailure classifies only diagnostics from a completed runc process.
+// commandFailure classifies only diagnostics from a normally exited runc process.
 // Launch, context and filesystem errors must never look like container absence.
 type commandFailure struct {
 	cause   error
@@ -39,6 +41,27 @@ type commandFailure struct {
 
 func (e *commandFailure) Error() string { return e.cause.Error() + ": " + e.detail }
 func (e *commandFailure) Unwrap() error { return e.cause }
+
+// The default runc logger emits a single logrus text record. Match its entire
+// envelope before unquoting msg; a status phrase inside a pathname is not status.
+var runcTextDiagnostic = regexp.MustCompile(`^time=("[^"\r\n]+"|[^ \t\r\n]+) level=(error|fatal) msg=("(\\.|[^"\\\r\n])*")$`)
+
+func runcErrorMessage(stderr string) string {
+	message := strings.TrimSpace(stderr)
+	var entry struct {
+		Level   string `json:"level"`
+		Message string `json:"msg"`
+	}
+	if json.Unmarshal([]byte(message), &entry) == nil && (entry.Level == "error" || entry.Level == "fatal") {
+		return entry.Message
+	}
+	if fields := runcTextDiagnostic.FindStringSubmatch(message); fields != nil {
+		if decoded, err := strconv.Unquote(fields[3]); err == nil {
+			return decoded
+		}
+	}
+	return message
+}
 
 // State is the stable subset of `runc list --format json` used by sandboxd.
 type State struct {
@@ -85,13 +108,20 @@ func (c *Client) command(ctx context.Context, args ...string) ([]byte, error) {
 	}
 	detail := strings.Join(details, "\n")
 	var exitErr *exec.ExitError
-	if !errors.As(err, &exitErr) {
+	if !errors.As(err, &exitErr) || !exitErr.ProcessState.Exited() || exitErr.ExitCode() <= 0 {
 		return stdout.Bytes(), fmt.Errorf("%w: %s", err, detail)
 	}
-	message := strings.ToLower(detail)
-	missing := strings.Contains(message, "container does not exist")
-	stopped := missing || strings.Contains(message, "container is not running") ||
-		strings.Contains(message, "container is stopped") || strings.Contains(message, "container not running")
+	var missing, stopped bool
+	// Failed status commands have no stdout. Do not discard an additional
+	// diagnostic or partial result merely because stderr includes a status.
+	if strings.TrimSpace(stdout.String()) == "" {
+		switch runcErrorMessage(stderr.String()) {
+		case "container does not exist":
+			missing, stopped = true, true
+		case "container is not running", "container is stopped", "container not running":
+			stopped = true
+		}
+	}
 	return stdout.Bytes(), &commandFailure{cause: err, detail: detail, missing: missing, stopped: stopped}
 }
 
