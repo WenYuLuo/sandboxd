@@ -107,7 +107,11 @@ func newOciMountManagerForFS(imgSvc imageapi.Service) *ociMountManager {
 func (m *fsManager) Prepare(ctx context.Context, request *runtime.StartRequest) (_ *preparedFS, retErr error) {
 	rootfs, err := m.rootfs.AddLangRuntimeWithContext(ctx, request, true)
 	if err != nil {
-		return nil, err
+		stage := "rootfs preparation"
+		if request.Rootfs != nil && request.Rootfs.Type == runtime.RootfsSrcType_IMAGE {
+			stage = "image pull (rootfs)"
+		}
+		return nil, errord.WithStage(stage, err)
 	}
 	rootfs.IncRef()
 
@@ -145,7 +149,7 @@ func (m *fsManager) Prepare(ctx context.Context, request *runtime.StartRequest) 
 			}
 			path, err := m.oci.mountOCIWithContext(ctx, src.ImageUrl)
 			if err != nil {
-				return nil, fmt.Errorf("failed to mount OCI image: %w", err)
+				return nil, errord.WithStage("image pull (volume "+mount.Target+")", err)
 			}
 			mount.Source = &runtime.Mount_HostPath{HostPath: path}
 			prepared.oci = append(prepared.oci, src.ImageUrl)

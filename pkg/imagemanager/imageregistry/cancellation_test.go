@@ -17,6 +17,11 @@ package imageregistry
 import (
 	"context"
 	"errors"
+	"fmt"
+	registrytransport "github.com/google/go-containerregistry/pkg/v1/remote/transport"
+	"github.com/inclusionAI/sandboxd/pkg/errord"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -211,5 +216,33 @@ func TestCancellationKeepsOtherHTTP2RequestsAlive(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("second request did not finish")
+	}
+}
+
+func TestRegistryRejectionsKeepTheirErrorCategory(t *testing.T) {
+	for _, tc := range []struct {
+		http int
+		grpc codes.Code
+	}{
+		{400, codes.InvalidArgument}, {401, codes.Unauthenticated}, {403, codes.PermissionDenied},
+		{404, codes.NotFound}, {429, codes.ResourceExhausted}, {503, codes.Unavailable},
+		{408, codes.DeadlineExceeded}, {504, codes.DeadlineExceeded},
+	} {
+		source := &registrytransport.Error{StatusCode: tc.http}
+		wrapped := ClassifyError(fmt.Errorf("manifest rejected: %w", source))
+		if !errors.Is(wrapped, source) {
+			t.Fatal("lost registry cause", wrapped)
+		}
+		if ClassifyError(wrapped) != wrapped {
+			t.Fatal("classification duplicated the cause", wrapped)
+		}
+		got := status.Code(errord.ToGRPC(wrapped))
+		if got != tc.grpc {
+			t.Fatalf("HTTP %d: got %v want %v", tc.http, got, tc.grpc)
+		}
+	}
+	source := errors.New("connection reset by peer")
+	if got := ClassifyError(source); got != source {
+		t.Fatal(got)
 	}
 }

@@ -17,6 +17,7 @@ package imageregistry
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -31,6 +32,8 @@ import (
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
+	registrytransport "github.com/google/go-containerregistry/pkg/v1/remote/transport"
+	"github.com/inclusionAI/sandboxd/pkg/errord"
 	"github.com/sirupsen/logrus"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
@@ -128,7 +131,7 @@ func (c *Client) FetchImage(ctx context.Context, imageRef string, proxyURL strin
 	stageStart = time.Now()
 	img, err := remote.Image(ref, options...)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch image %s: %w", imageRef, err)
+		return nil, fmt.Errorf("failed to fetch image %s: %w", imageRef, ClassifyError(err))
 	}
 	fetchDuration := time.Since(stageStart)
 
@@ -304,4 +307,36 @@ func (k *registryKeychain) Resolve(res authn.Resource) (authn.Authenticator, err
 	}
 
 	return authn.Anonymous, nil
+}
+
+// ClassifyError retains registry rejection causes across image preparation.
+// A registry HTTP rejection is distinct from a connection failure or deadline.
+func ClassifyError(err error) error {
+	var response *registrytransport.Error
+	if !errors.As(err, &response) {
+		return err
+	}
+	var kind error
+	switch response.StatusCode {
+	case http.StatusBadRequest:
+		kind = errord.ErrInvalidArgument
+	case http.StatusUnauthorized:
+		kind = errord.ErrUnauthenticated
+	case http.StatusForbidden:
+		kind = errord.ErrPermissionDenied
+	case http.StatusNotFound:
+		kind = errord.ErrNotFound
+	case http.StatusTooManyRequests:
+		kind = errord.ErrResourceExhausted
+	case http.StatusServiceUnavailable, http.StatusBadGateway:
+		kind = errord.ErrUnavailable
+	case http.StatusRequestTimeout, http.StatusGatewayTimeout:
+		kind = context.DeadlineExceeded
+	default:
+		return err
+	}
+	if errors.Is(err, kind) {
+		return err
+	}
+	return fmt.Errorf("%w: %w", kind, err)
 }

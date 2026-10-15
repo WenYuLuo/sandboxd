@@ -306,6 +306,7 @@ func (m *Manager) MountImageWithContext(ctx context.Context, imageURL string) (s
 // MountImageConfigWithContext is MountImageWithContext plus the OCI process
 // metadata needed for inherited image startup.
 func (m *Manager) MountImageConfigWithContext(ctx context.Context, imageURL string) (mountPath string, envVars []string, imageProcess *imageconfig.Process, retErr error) {
+	defer func() { retErr = imageregistry.ClassifyError(retErr) }()
 	timing, ctx := StartOCITimedOperation(ctx, "oci.MountImage", imageURL)
 	defer timing.End()
 	opStart := time.Now()
@@ -520,7 +521,8 @@ func (m *Manager) MountImageConfigWithContext(ctx context.Context, imageURL stri
 // ImageProcessWithContext returns process metadata for a mounted image. Mount
 // records created before process metadata was introduced are upgraded lazily,
 // so ordinary cached mounts remain usable without registry access.
-func (m *Manager) ImageProcessWithContext(ctx context.Context, imageURL string) (*imageconfig.Process, error) {
+func (m *Manager) ImageProcessWithContext(ctx context.Context, imageURL string) (_ *imageconfig.Process, retErr error) {
+	defer func() { retErr = imageregistry.ClassifyError(retErr) }()
 	if imageURL == "" {
 		return nil, fmt.Errorf("imageURL is required")
 	}

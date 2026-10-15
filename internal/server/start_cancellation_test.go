@@ -16,6 +16,8 @@ package server
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,7 +31,9 @@ import (
 	imageapi "github.com/inclusionAI/sandboxd/pkg/imagemanager/api"
 	"github.com/inclusionAI/sandboxd/pkg/imagemanager/oci"
 	svc "github.com/inclusionAI/sandboxd/pkg/runtime"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 )
 
@@ -131,5 +135,36 @@ func TestStartCancellationRollsBackBlockedOCIPreparation(t *testing.T) {
 			}
 			s.sandboxManager.ReleaseID(req.SandboxID)
 		})
+	}
+}
+
+type startFailureStream struct{ trailers metadata.MD }
+
+func (*startFailureStream) Method() string               { return "/runtime.v1.SandboxService/Start" }
+func (*startFailureStream) SetHeader(metadata.MD) error  { return nil }
+func (*startFailureStream) SendHeader(metadata.MD) error { return nil }
+func (s *startFailureStream) SetTrailer(md metadata.MD) error {
+	s.trailers = metadata.Join(s.trailers, md)
+	return nil
+}
+
+func TestStartFailurePreservesStageAndApplicationTimeout(t *testing.T) {
+	for _, stage := range []string{"image pull (rootfs)", "runtime start (runc)"} {
+		for _, cause := range []error{os.ErrDeadlineExceeded, context.DeadlineExceeded, status.Error(codes.DeadlineExceeded, "internal timer")} {
+			stream := &startFailureStream{}
+			ctx := grpc.NewContextWithServerTransportStream(context.Background(), stream)
+			err := startFailure(ctx, stage, fmt.Errorf("operation failed: %w", cause))
+			if status.Code(err) != codes.DeadlineExceeded || !strings.Contains(status.Convert(err).Message(), stage) {
+				t.Fatalf("stage lost: %v", err)
+			}
+			if got := stream.trailers.Get("sandboxd-start-failure"); len(got) != 1 || got[0] != "true" {
+				t.Fatalf("application failure missing: %v", got)
+			}
+		}
+	}
+	stream := &startFailureStream{}
+	ctx := grpc.NewContextWithServerTransportStream(context.Background(), stream)
+	if err := startFailure(ctx, "runtime start (runc)", errors.New("lost reply")); status.Code(err) == codes.DeadlineExceeded || len(stream.trailers) != 0 {
+		t.Fatal(err, stream.trailers)
 	}
 }
