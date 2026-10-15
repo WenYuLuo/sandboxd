@@ -226,8 +226,27 @@ func (t *registryTransport) RoundTrip(req *http.Request) (*http.Response, error)
 		}
 		resp.Close = true
 	}
+	resp.Body = &registryResponseBody{ReadCloser: resp.Body, ctx: req.Context()}
 
 	return resp, nil
+}
+
+// A server can finish a response body as it observes a canceled request. Keep
+// that EOF from being interpreted as a successful, potentially empty manifest.
+type registryResponseBody struct {
+	io.ReadCloser
+	ctx context.Context
+}
+
+func (b *registryResponseBody) Read(p []byte) (int, error) {
+	if err := b.ctx.Err(); err != nil {
+		return 0, err
+	}
+	n, err := b.ReadCloser.Read(p)
+	if ctxErr := b.ctx.Err(); ctxErr != nil {
+		return n, ctxErr
+	}
+	return n, err
 }
 
 func shouldCloseConnOnServerError(resp *http.Response) bool {

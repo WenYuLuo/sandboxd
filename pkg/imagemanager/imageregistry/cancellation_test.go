@@ -26,6 +26,58 @@ import (
 	"github.com/inclusionAI/sandboxd/internal/testregistry"
 )
 
+func TestRegistryBodyPreservesCancellationAtEOF(t *testing.T) {
+	for _, mode := range []string{"live", "cancel", "deadline"} {
+		t.Run(mode, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			want := error(nil)
+			if mode == "deadline" {
+				ctx, cancel = context.WithTimeout(context.Background(), time.Millisecond)
+				defer cancel()
+				want = context.DeadlineExceeded
+			}
+			transport := &registryTransport{roundTripper: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				body := &eofOnCancelBody{}
+				if mode == "cancel" {
+					body.finish = cancel
+				} else if mode == "deadline" {
+					body.finish = func() { <-ctx.Done() }
+				}
+				return &http.Response{StatusCode: http.StatusOK, Body: body}, nil
+			})}
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://registry.example/v2/image/manifests/latest", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp, err := transport.RoundTrip(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			if mode == "cancel" {
+				// A server may finish its chunked body as it observes the
+				// disconnect, racing the client's cancellation error.
+				want = context.Canceled
+			}
+			if _, err := io.ReadAll(resp.Body); !errors.Is(err, want) {
+				t.Fatalf("body error = %v, want %v", err, want)
+			}
+		})
+	}
+}
+
+type eofOnCancelBody struct{ finish func() }
+
+func (b *eofOnCancelBody) Read([]byte) (int, error) {
+	if b.finish != nil {
+		b.finish()
+	}
+	return 0, io.EOF
+}
+
+func (*eofOnCancelBody) Close() error { return nil }
+
 func TestFetchImageCancellationInterruptsBlockedResponse(t *testing.T) {
 	for _, stage := range []string{"manifest", "config", "layer"} {
 		t.Run(stage, func(t *testing.T) {
