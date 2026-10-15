@@ -16,6 +16,7 @@ package runc
 
 import (
 	"context"
+	"net"
 	"os"
 	"path/filepath"
 	"testing"
@@ -23,6 +24,7 @@ import (
 
 	"github.com/inclusionAI/sandboxd/config"
 	"github.com/inclusionAI/sandboxd/internal/runcshim"
+	"github.com/inclusionAI/sandboxd/pkg/networkmanager"
 	runtimecore "github.com/inclusionAI/sandboxd/pkg/runtime"
 	runtimecommon "github.com/inclusionAI/sandboxd/pkg/runtime/internal/common"
 	"github.com/stretchr/testify/assert"
@@ -32,6 +34,61 @@ import (
 func TestRuncCgroupPathUsesRuntimeOwnedChild(t *testing.T) {
 	assert.Equal(t, "/sandbox/sbox-test/runc", runcCgroupPath("/sandbox/sbox-test"))
 	assert.Empty(t, runcCgroupPath(""))
+}
+
+type cancellingOciLoader struct {
+	cancel context.CancelFunc
+	called bool
+}
+
+func (l *cancellingOciLoader) GenerateOci(runtimecore.OciLoadOptions) (string, *runtimecore.Spec, error) {
+	l.called = true
+	l.cancel()
+	return "", &runtimecore.Spec{}, nil
+}
+
+func TestRuncStartAlreadyCancelledAllocatesNothing(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	root := t.TempDir()
+	loader := &cancellingOciLoader{cancel: cancel}
+	handler := &Handler{sandboxRoot: root, ociLoader: loader}
+
+	err := handler.Start(ctx, runtimecore.StartConfig{ID: "expired"})
+
+	require.ErrorIs(t, err, context.Canceled)
+	assert.False(t, loader.called)
+	entries, err := os.ReadDir(root)
+	require.NoError(t, err)
+	assert.Empty(t, entries)
+}
+
+func TestRuncStartStopsAfterPreparationCancelsContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	loader := &cancellingOciLoader{cancel: cancel}
+	handler := &Handler{sandboxRoot: t.TempDir(), ociLoader: loader}
+	config := runtimecore.StartConfig{
+		ID: "expired", CgroupPath: "/private-cgroup",
+		Network: &networkmanager.NetResource{
+			Interface: &net.Interface{Name: "pv.test"},
+			NetNSPath: "/var/run/netns/runc-sbox-expired",
+			Lifecycle: networkmanager.InterfaceLifecycleEphemeral,
+		},
+	}
+
+	err := handler.Start(ctx, config)
+
+	require.True(t, loader.called)
+	require.ErrorIs(t, err, context.Canceled)
+}
+
+func TestRuncWaitStartedRejectsCancelledReadyMarker(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	bundle := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(bundle, runcshim.InitPIDFile), []byte("42"), 0600))
+	require.ErrorIs(t, (&Handler{}).waitStarted(ctx, bundle), context.Canceled)
 }
 
 func TestValidateExecutable(t *testing.T) {

@@ -18,9 +18,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
+
+	"github.com/inclusionAI/sandboxd/internal/util"
 )
 
 // State is the stable subset of `runc list --format json` used by sandboxd.
@@ -101,13 +106,41 @@ func (c *Client) Kill(ctx context.Context, id, signal string, all bool) error {
 }
 
 func (c *Client) Delete(ctx context.Context, id string, force bool) error {
+	if id == "" || filepath.Base(id) != id {
+		return fmt.Errorf("invalid runc state id %q", id)
+	}
+	statePath, err := util.JoinWithinRoot(c.root, id)
+	if err != nil {
+		return err
+	}
 	args := []string{"delete"}
 	if force {
 		args = append(args, "--force")
 	}
 	args = append(args, id)
-	_, err := c.command(ctx, args...)
-	return err
+	_, err = c.command(ctx, args...)
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || !IsNotFound(err) {
+		return err
+	}
+	// A failed runc run can create its directory before writing state.json.
+	// The CLI reports that container as absent without removing the directory.
+	// Only remove an empty directory after confirmed absence; preserve state
+	// files, symlinks and unexpected entries for recovery instead of masking them.
+	info, statErr := os.Lstat(statePath)
+	if os.IsNotExist(statErr) {
+		return nil
+	}
+	if statErr != nil {
+		return fmt.Errorf("inspect runc state directory: %w", statErr)
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("runc state path is not a directory: %s", statePath)
+	}
+	if removeErr := os.Remove(statePath); removeErr != nil && !os.IsNotExist(removeErr) {
+		return fmt.Errorf("remove empty runc state directory: %w", removeErr)
+	}
+	return nil
 }
 
 // IsNotFound reports the stable class of errors produced for missing state.

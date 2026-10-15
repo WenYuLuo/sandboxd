@@ -167,6 +167,11 @@ func runcCgroupPath(parent string) string {
 }
 
 func (r *Handler) Start(ctx context.Context, startConfig runtimecore.StartConfig) (retErr error) {
+	// Image preparation can finish after the caller's create deadline.
+	// Do not allocate runtime state or launch a shim for that late result.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if startConfig.Network == nil {
 		return fmt.Errorf("runc network is required")
 	}
@@ -204,6 +209,9 @@ func (r *Handler) Start(ctx context.Context, startConfig runtimecore.StartConfig
 	if err != nil {
 		return fmt.Errorf("generate runc OCI bundle: %w", err)
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := ensureRuncConsoleMount(spec); err != nil {
 		return err
 	}
@@ -228,6 +236,9 @@ func (r *Handler) Start(ctx context.Context, startConfig runtimecore.StartConfig
 			retErr = errors.Join(retErr, cleanupRootfs())
 		}
 	}()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	if err := r.launchShim(bundlePath, startConfig); err != nil {
 		return err
@@ -281,6 +292,9 @@ func (r *Handler) waitStarted(ctx context.Context, bundlePath string) error {
 	timer := time.NewTimer(config.DefaultTimeout)
 	defer timer.Stop()
 	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if _, err := os.Stat(filepath.Join(bundlePath, runcshim.InitPIDFile)); err == nil {
 			return nil
 		}
