@@ -1425,7 +1425,7 @@ func (h *sandboxService) Start(ctx context.Context, request *runtime.StartReques
 	fsCh := make(chan fsPrepareResult, 1)
 	resourceCh := make(chan resourcePrepareResult, 1)
 	go func() {
-		preparedFS, err := h.fsMgr.Prepare(startReq)
+		preparedFS, err := h.fsMgr.Prepare(ctx, startReq)
 		fsCh <- fsPrepareResult{fs: preparedFS, err: err}
 	}()
 	go func() {
@@ -1443,7 +1443,7 @@ func (h *sandboxService) Start(ctx context.Context, request *runtime.StartReques
 			Code:    -1,
 			Message: fmt.Sprintf("failed to prepare sandbox: %v", err),
 			ID:      "",
-		}, err
+		}, errord.ToGRPC(err)
 	}
 	runtimeRootfs := preparedFilesystem.RootfsPath()
 	var specUpdates *svc.SpecUpdates
@@ -1487,7 +1487,7 @@ func (h *sandboxService) Start(ctx context.Context, request *runtime.StartReques
 	}
 	var imageProcess *imageProcessSpec
 	if startReq.InjectEntrypoint != "" {
-		resolvedImageProcess, resolveErr := preparedFilesystem.rootfs.RootFS.ResolveImageProcess()
+		resolvedImageProcess, resolveErr := preparedFilesystem.rootfs.RootFS.ResolveImageProcess(ctx)
 		if resolveErr != nil {
 			return &runtime.StartResponse{
 				Code:    -1,

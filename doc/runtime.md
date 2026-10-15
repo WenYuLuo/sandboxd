@@ -70,6 +70,12 @@ In direct mode, the source path is resolved in the sandboxd process's filesystem
 
 Configure nameservers that the sandbox can actually reach from its network environment; selecting a file does not provide DNS forwarding. In particular, a node-local loopback resolver or Docker's embedded `127.0.0.11` must not be assumed reachable, and this option does not recreate Docker container-name resolution. A flat resolver file also cannot represent systemd-resolved's per-link split-DNS routing; operators using split DNS must validate a suitable resolver path and connectivity for their deployment. This setting is not a live-update mechanism: changes to its configuration or source file are not guaranteed to update existing sandboxes. Recreate a sandbox to apply a changed resolver deterministically.
 
+## Cancelled OCI preparation
+
+Start passes its request context through filesystem preparation, shared-rootfs acquisition, OCI rootfs and image-volume mounting, and inherited process metadata lookup. The registry client binds that context to manifest, config and layer requests, including body reads. Cancellation interrupts blocked OCI downloads and extraction; the preparation workers finish before Start releases its reserved ID and rolls back resources. Rollback and unmount use their cleanup contexts, independently of the cancelled Start context.
+
+A caller waiting for a shared rootfs, OCI image or layer can cancel its own wait. Cancelling one creator does not cancel another caller's context: a live rootfs waiter can retry creation, and a different image sharing a layer can acquire it after the cancelled owner finishes. Successfully cached layers retain their normal reference-count and garbage-collection policy. These guarantees cover the regular OCI path; S3/FUSE daemon startup and Nydus bootstrap lifecycle retain their existing cancellation behavior. Transport cancellation alone is not a physical-cleanup acknowledgement.
+
 ## OOM and failed deletion
 
 A host cgroup OOM makes the entire sandbox terminal (`OOMKilled=true`, exit code 137), even when the kernel kills only a worker and the runtime's init process remains alive. Sandboxd consumes the kernel OOM notification independently of runtime Wait and drains the remaining tasks in that sandbox's allocated cgroup. The OOM lease is guarded against reset so an old notification cannot terminate a later user of the cached cgroup. Cgroup-disabled sandboxes have no host OOM notification; guest-only OOMs remain runtime-owned.

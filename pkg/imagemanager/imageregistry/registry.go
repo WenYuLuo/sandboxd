@@ -93,6 +93,9 @@ func (c *Client) FetchImageWithFallback(ctx context.Context, imageRef string, pr
 		if err == nil {
 			return img, nil
 		}
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		logrus.Warnf("failed to fetch image %s via HTTP proxy, fallback to HTTPS: %v", imageRef, err)
 	}
 
@@ -117,7 +120,7 @@ func (c *Client) FetchImage(ctx context.Context, imageRef string, proxyURL strin
 	parseDuration := time.Since(stageStart)
 
 	stageStart = time.Now()
-	options := []remote.Option{remote.WithAuthFromKeychain(c.keychain)}
+	options := []remote.Option{remote.WithAuthFromKeychain(c.keychain), remote.WithContext(ctx)}
 	transport := c.getOrCreateTransport(proxyURL)
 	options = append(options, remote.WithTransport(transport))
 	transportDuration := time.Since(stageStart)
@@ -208,7 +211,9 @@ func (t *registryTransport) RoundTrip(req *http.Request) (*http.Response, error)
 
 	resp, err := roundTripper.RoundTrip(req)
 	if err != nil {
-		if conn != nil {
+		// The transport cancels the request stream itself. Closing a shared
+		// HTTP/2 connection here would cancel unrelated image consumers.
+		if conn != nil && req.Context().Err() == nil {
 			_ = conn.Close()
 		}
 		return nil, err
