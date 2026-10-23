@@ -173,7 +173,8 @@ func TestIsMountpoint(t *testing.T) {
 	assert.False(t, m)
 
 	// Test mountpoint false
-	m, err = IsMountpoint("/tmp")
+	// /tmp itself may be a separate filesystem on the test host.
+	m, err = IsMountpoint(t.TempDir())
 	assert.NoError(t, err)
 	assert.False(t, m)
 
