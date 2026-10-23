@@ -106,6 +106,7 @@ func NewHandler(cfg config.Config, bin string, loader runtimecore.OciLoader) (*H
 			OverlayTmpfsSize:  cfg.RuntimeConfig.OverlayTmpfsSize,
 			DebugLogPath:      runscLogPath,
 			IgnoreCgroups:     cfg.DisableCgroup,
+			BackgroundRestore: cfg.RuntimeConfig.Runsc.BackgroundRestore,
 			ReflinkFilestores: checkpointMode == "reflink",
 		}),
 		ociLoader:              loader,

@@ -66,6 +66,7 @@ type Options struct {
 	DebugLogPath       string
 	IgnoreCgroups      bool
 	PlatformDevicePath string
+	BackgroundRestore  bool
 	ReflinkFilestores  bool
 }
 
@@ -402,6 +403,7 @@ func (c *Client) Restore(ctx context.Context, args StartArgs, imagePath string) 
 	opts := &restoreOpts{
 		payload:       filePayload{Files: files},
 		HavePagesFile: havePagesFile,
+		Background:    c.Options.BackgroundRestore,
 	}
 	device, err := c.openPlatformDevice()
 	if err != nil {
