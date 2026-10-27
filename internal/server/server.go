@@ -74,6 +74,9 @@ var _ SandboxService = &sandboxService{}
 
 // sandboxService implements SandboxService.
 type sandboxService struct {
+	startMu         sync.Mutex
+	startOperations map[string]*startOperation
+
 	// config is the sandbox service config
 	config         config.Config
 	serviceHandler cmap.ConcurrentMap[string, svc.Handler]
@@ -1070,7 +1073,13 @@ func validateRuntimeFilestore(runtimeConfig config.RuntimeConfig) error {
 }
 
 func (h *sandboxService) Delete(ctx context.Context, request *runtime.DeleteRequest) (response *runtime.DeleteResponse, err error) {
+	if request != nil && request.StartKey != "" {
+		return h.deleteStart(ctx, request)
+	}
 	err = h.deleteSandbox(ctx, request.ID)
+	if err == nil {
+		h.forgetSettledStart(request.ID)
+	}
 	return response, err
 }
 
@@ -1198,13 +1207,27 @@ func (h *sandboxService) Start(ctx context.Context, request *runtime.StartReques
 		err := fmt.Errorf("start request is nil")
 		return &runtime.StartResponse{Code: -1, Message: err.Error()}, err
 	}
+	if _, reserved := request.Labels[startKeyLabel]; reserved {
+		return nil, status.Error(codes.InvalidArgument, "start key label is managed by sandboxd")
+	}
+	if _, reserved := request.Labels[startKeyLabel]; reserved {
+		return nil, status.Error(codes.InvalidArgument, "start key label is managed by sandboxd")
+	}
+	startCtx, finishStart, err := h.beginStart(ctx, request.StartKey)
+	if err != nil {
+		return nil, err
+	}
+	defer finishStart()
+	ctx = startCtx
+	if err := ctx.Err(); err != nil {
+		return nil, status.FromContextError(err).Err()
+	}
 	if !h.recoveryReady.Load() {
 		err := errord.ToGRPCf(errord.ErrUnavailable, "distillfs recovery is incomplete")
 		return &runtime.StartResponse{Code: -1, Message: err.Error()}, err
 	}
 	startReq := proto.Clone(request).(*runtime.StartRequest)
 	checkpointDir := ""
-	var err error
 	if startReq.CheckpointInfo != nil {
 		checkpointDir, err = validateCheckpointInputDirectory(
 			startReq.CheckpointInfo.CheckpointDir,
@@ -1386,6 +1409,13 @@ func (h *sandboxService) Start(ctx context.Context, request *runtime.StartReques
 		}, errord.ToGRPC(err)
 	}
 	startReq.SandboxID = sandboxID
+	h.setStartSandbox(request.StartKey, sandboxID)
+	if startReq.StartKey != "" {
+		if startReq.Labels == nil {
+			startReq.Labels = make(map[string]string)
+		}
+		startReq.Labels[startKeyLabel] = startReq.StartKey
+	}
 	startSucceeded := false
 	var preparedFilesystem *preparedFS
 	var preparedResources *preparedStartResources
