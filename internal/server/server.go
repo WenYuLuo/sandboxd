@@ -381,13 +381,12 @@ func (h *sandboxService) deleteSandbox(ctx context.Context, sandboxID string) er
 }
 
 func (h *sandboxService) List(ctx context.Context, request *runtime.ListSandboxesRequest) (*runtime.ListSandboxesResponse, error) {
+	h.startMu.Lock()
+	defer h.startMu.Unlock()
 	var sandboxes []*sandbox.Sandbox
 	response := new(runtime.ListSandboxesResponse)
 	if request.ID != "" {
 		sandboxes = h.sandboxManager.List(sandbox.ListFilterById(request.ID))
-		if len(sandboxes) == 0 {
-			return response, errord.ToGRPC(errord.ErrNotFound)
-		}
 	} else {
 		sandboxes = h.sandboxManager.List(sandbox.ListFilterByLabels(request.Selector))
 	}
@@ -409,6 +408,18 @@ func (h *sandboxService) List(ctx context.Context, request *runtime.ListSandboxe
 			Stdout:       c.Metadata.Stdout,
 			Stderr:       c.Metadata.Stderr,
 		})
+	}
+	seen := make(map[string]bool)
+	for _, s := range response.Sandboxes {
+		seen[s.ID] = true
+	}
+	for _, pending := range h.pendingInventoryLocked(request) {
+		if !seen[pending.ID] {
+			response.Sandboxes = append(response.Sandboxes, pending)
+		}
+	}
+	if request.ID != "" && len(response.Sandboxes) == 0 {
+		return response, errord.ToGRPC(errord.ErrNotFound)
 	}
 	return response, nil
 }
@@ -1076,6 +1087,11 @@ func (h *sandboxService) Delete(ctx context.Context, request *runtime.DeleteRequ
 	if request != nil && request.StartKey != "" {
 		return h.deleteStart(ctx, request)
 	}
+	if request != nil && request.ID != "" {
+		if key := h.activeStartKey(request.ID); key != "" {
+			return h.deleteStart(ctx, &runtime.DeleteRequest{StartKey: key})
+		}
+	}
 	err = h.deleteSandbox(ctx, request.ID)
 	if err == nil {
 		h.forgetSettledStart(request.ID)
@@ -1416,6 +1432,7 @@ func (h *sandboxService) Start(ctx context.Context, request *runtime.StartReques
 		}
 		startReq.Labels[startKeyLabel] = startReq.StartKey
 	}
+	h.setStartInventory(startReq)
 	startSucceeded := false
 	var preparedFilesystem *preparedFS
 	var preparedResources *preparedStartResources
