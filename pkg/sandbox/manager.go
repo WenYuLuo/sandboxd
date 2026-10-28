@@ -323,6 +323,17 @@ func (m *Manager) housekeeping() {
 			if err := sb.Status.UpdateSync(func(status Status) (Status, error) {
 				return UpdateStatusByState(cstates[id], status), nil
 			}); err != nil {
+				// Delete can remove this root after the check above, including
+				// between an atomic status write's temporary file and rename.
+				// Treat that like an already absent root, not a node failure.
+				// A missing temporary file under a live root, permission errors
+				// and other persistence failures must still affect readiness.
+				if errors.Is(err, os.ErrNotExist) {
+					if _, statErr := os.Stat(sb.PATH); errors.Is(statErr, os.ErrNotExist) {
+						logrus.Debugf("sandbox %s removed during status reconciliation", id)
+						continue
+					}
+				}
 				ready = false
 				logrus.Errorf("update sandbox %s status failed: %v", id, err)
 			}
