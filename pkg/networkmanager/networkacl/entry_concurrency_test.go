@@ -18,6 +18,7 @@ import (
 
 	"github.com/inclusionAI/sandboxd/pkg/store"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/net/dns/dnsmessage"
 )
 
 type pausedRecordStore struct {
@@ -86,4 +87,74 @@ func TestLegacyStateMigratesOnce(t *testing.T) {
 	next := &Manager{store: db, entries: map[string]persistedEntry{}}
 	require.NoError(t, next.loadState())
 	require.Empty(t, next.entries)
+}
+
+func TestDNSResponseCannotCrossEndpointIncarnation(t *testing.T) {
+	for _, replacement := range []string{"old", "replacement"} {
+		t.Run(replacement, func(t *testing.T) {
+			db, err := store.Open(filepath.Join(t.TempDir(), "state.db"))
+			require.NoError(t, err)
+			defer db.Close()
+			m := &Manager{store: db, entries: map[string]persistedEntry{}, sourceIndex: map[string]string{}, iptables: &iptablesBackend{deleteConntrackForIP: func(net.IP) error { return nil }}}
+			require.NoError(t, m.loadState())
+			ip := net.ParseIP("10.88.0.2")
+			require.NoError(t, m.Register(Binding{SandboxID: "old", IP: ip, HostVeth: "lo"}, Policy{}))
+			old := m.entries["old"]
+			upstream, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
+			require.NoError(t, err)
+			defer upstream.Close()
+			entered, release := make(chan struct{}), make(chan struct{})
+			var once sync.Once
+			unblock := func() { once.Do(func() { close(release) }) }
+			defer unblock()
+			upstreamDone := make(chan error, 1)
+			go func() {
+				buffer := make([]byte, 4096)
+				n, peer, err := upstream.ReadFromUDP(buffer)
+				if err != nil {
+					upstreamDone <- err
+					return
+				}
+				var reply dnsmessage.Message
+				if err = reply.Unpack(buffer[:n]); err != nil {
+					upstreamDone <- err
+					return
+				}
+				reply.Header.Response = true
+				response, err := reply.Pack()
+				if err != nil {
+					upstreamDone <- err
+					return
+				}
+				close(entered)
+				<-release
+				_, err = upstream.WriteToUDP(response, peer)
+				upstreamDone <- err
+			}()
+			request, err := (&dnsmessage.Message{Header: dnsmessage.Header{ID: 17}, Questions: []dnsmessage.Question{{Name: testDNSName(t, "service.example."), Type: dnsmessage.TypeA, Class: dnsmessage.ClassINET}}}).Pack()
+			require.NoError(t, err)
+			proxy := &dnsProxy{upstreams: []string{upstream.LocalAddr().String()}, authorize: m.authorizeDNS, observe: m.observeDNS}
+			response := make(chan []byte, 1)
+			failure := make(chan error, 1)
+			go func() { data, err := proxy.handle(ip, request, "udp"); response <- data; failure <- err }()
+			select {
+			case <-entered:
+			case <-time.After(3 * time.Second):
+				t.Fatal("DNS request did not reach upstream")
+			}
+			require.NoError(t, m.Remove("old"))
+			require.NoError(t, m.Register(Binding{SandboxID: replacement, IP: ip, HostVeth: "lo"}, Policy{}))
+			next := m.entries[replacement]
+			require.Equal(t, old.Generation, next.Generation, "empty-policy generations are both zero")
+			require.NotEqual(t, old.Incarnation, next.Incarnation)
+			unblock()
+			require.NoError(t, <-upstreamDone)
+			var reply dnsmessage.Message
+			require.NoError(t, reply.Unpack(<-response))
+			require.NoError(t, <-failure)
+			require.Equal(t, dnsmessage.RCodeServerFailure, reply.Header.RCode)
+			require.Empty(t, m.entries[replacement].DomainGrants)
+			require.NoError(t, m.Remove(replacement))
+		})
+	}
 }
