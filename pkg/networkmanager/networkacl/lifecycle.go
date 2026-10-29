@@ -17,7 +17,6 @@ package networkacl
 import (
 	"fmt"
 
-	"github.com/inclusionAI/sandboxd/internal/diagnostics"
 	"github.com/inclusionAI/sandboxd/pkg/errord"
 )
 
@@ -26,72 +25,78 @@ type removal struct {
 	err  error
 }
 
-// Remove reserves the endpoint until both kernel cleanup and its final durable
-// removal succeed. Other endpoints may make progress during slow iptables and
-// conntrack operations. Restore/Close wait for all such operations to settle.
-func (m *Manager) Remove(sandboxID string) (result error) {
+// Remove joins an in-flight removal before waiting on the endpoint operation.
+// Reservations survive kernel or persistence failure and are released only after
+// durable deletion, so stale work can never affect a replacement endpoint.
+func (m *Manager) Remove(sandboxID string) error {
 	m.lifecycleMu.RLock()
 	defer m.lifecycleMu.RUnlock()
-	unlockPrepare := diagnostics.Lock(&m.mu, "acl.remove.prepare")
+	return m.remove(sandboxID)
+}
+
+func (m *Manager) remove(id string) (result error) {
+	m.mu.Lock()
 	if m.closed {
-		unlockPrepare()
+		m.mu.Unlock()
 		return errord.ErrUnavailable
 	}
-	if pending := m.removals[sandboxID]; pending != nil {
-		unlockPrepare()
+	if pending := m.removals[id]; pending != nil {
+		m.mu.Unlock()
 		<-pending.done
-		// Join the original operation, not whatever incarnation may now own the ID.
 		return pending.err
 	}
-	entry, ok := m.entries[sandboxID]
-	if !ok {
-		unlockPrepare()
+	if _, ok := m.entries[id]; !ok {
+		m.mu.Unlock()
 		return nil
-	}
-	if m.iptables == nil {
-		defer unlockPrepare()
-		return m.reconcileOrphansLocked(map[string]persistedEntry{sandboxID: entry})
-	}
-	if err := m.checkCleanupOwnershipLocked(sandboxID, entry); err != nil {
-		unlockPrepare()
-		return err
-	}
-	if !entry.Orphaned {
-		previous := entry
-		sourceOwner, sourcePresent := m.sourceIndex[entry.IP]
-		entry.Orphaned = true
-		m.entries[sandboxID] = entry
-		if sourceOwner == sandboxID {
-			delete(m.sourceIndex, entry.IP)
-		}
-		if err := m.persistLocked(); err != nil {
-			m.entries[sandboxID] = previous
-			if sourcePresent {
-				m.sourceIndex[entry.IP] = sourceOwner
-			}
-			unlockPrepare()
-			return fmt.Errorf("persist network ACL cleanup intent: %w", err)
-		}
 	}
 	if m.removals == nil {
 		m.removals = make(map[string]*removal)
 	}
 	pending := &removal{done: make(chan struct{})}
-	m.removals[sandboxID] = pending
-	unlockPrepare()
-
-	cleanupErr := m.iptables.cleanup(entry)
-
-	defer diagnostics.Lock(&m.mu, "acl.remove.commit")()
-	defer func() { pending.err = result; delete(m.removals, sandboxID); close(pending.done) }()
-	if cleanupErr != nil {
-		return fmt.Errorf("clean network ACL for %s: %w", sandboxID, cleanupErr)
+	m.removals[id] = pending
+	m.mu.Unlock()
+	defer func() { m.mu.Lock(); pending.err = result; delete(m.removals, id); close(pending.done); m.mu.Unlock() }()
+	op, entry, err := m.acquireOperation(id, true)
+	if err != nil {
+		if err == errord.ErrNotFound {
+			return nil
+		}
+		return err
 	}
-	delete(m.entries, sandboxID)
-	if err := m.persistLocked(); err != nil {
-		m.entries[sandboxID] = entry
+	defer m.releaseOperation(id, op)
+	return m.removeEntry(id, entry)
+}
+
+// Caller owns this endpoint's operation lock and the lifecycle read barrier.
+func (m *Manager) removeEntry(id string, entry persistedEntry) error {
+	m.mu.RLock()
+	err := m.checkCleanupOwnershipLocked(id, entry)
+	m.mu.RUnlock()
+	if err != nil {
+		return err
+	}
+	if !entry.Orphaned {
+		entry.Orphaned = true
+		entry.Revision++
+		if err := m.persistEntry(id, &entry); err != nil {
+			return fmt.Errorf("persist network ACL cleanup intent: %w", err)
+		}
+		m.mu.Lock()
+		m.entries[id] = entry
+		if m.sourceIndex[entry.IP] == id {
+			delete(m.sourceIndex, entry.IP)
+		}
+		m.mu.Unlock()
+	}
+	if err := m.cleanupKernel(entry); err != nil {
+		return fmt.Errorf("clean network ACL for %s: %w", id, err)
+	}
+	if err := m.persistEntry(id, nil); err != nil {
 		return fmt.Errorf("persist removal of cleaned network ACL state: %w", err)
 	}
+	m.mu.Lock()
+	delete(m.entries, id)
+	m.mu.Unlock()
 	return nil
 }
 
