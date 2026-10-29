@@ -1126,23 +1126,23 @@ func (m *Manager) removeOwnedQdiscLocked(link netlink.Link) error {
 	return nil
 }
 
-func (m *Manager) authorizeDNS(source net.IP, names []string) bool {
+func (m *Manager) authorizeDNS(source net.IP, names []string) (dnsAuthorization, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	sandboxID, ok := m.sourceIndex[source.String()]
 	if !ok {
-		return false
+		return dnsAuthorization{}, false
 	}
 	entry, ok := m.entries[sandboxID]
 	if !ok || entry.Orphaned {
-		return false
+		return dnsAuthorization{}, false
 	}
 	for _, name := range names {
 		if !entry.Policy.AllowDNS(name) {
-			return false
+			return dnsAuthorization{}, false
 		}
 	}
-	return true
+	return dnsAuthorization{SandboxID: sandboxID, Incarnation: entry.Incarnation, Generation: entry.Generation}, true
 }
 
 func (m *Manager) sweepDomainGrants() {
@@ -1212,6 +1212,7 @@ func (m *Manager) expireEntryGrants(id string) error {
 const maxDerivedDomainGrants = 4096
 
 func (m *Manager) observeDNS(
+	authorization dnsAuthorization,
 	source net.IP, queryNames, grantNames []string, response []byte,
 ) ([]byte, error) {
 	m.lifecycleMu.RLock()
@@ -1219,6 +1220,10 @@ func (m *Manager) observeDNS(
 	m.mu.RLock()
 	sandboxID, ok := m.sourceIndex[source.String()]
 	entry, entryOK := m.entries[sandboxID]
+	if !ok || !entryOK || sandboxID != authorization.SandboxID || entry.Incarnation != authorization.Incarnation || entry.Generation != authorization.Generation {
+		m.mu.RUnlock()
+		return nil, fmt.Errorf("network endpoint or policy changed while resolving DNS for %s", source)
+	}
 	hasDomainRules := entryOK && !entry.Orphaned && policyHasDomainRules(entry.Policy)
 	queryAllowed := entryOK && !entry.Orphaned
 	if queryAllowed {

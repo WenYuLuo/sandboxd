@@ -398,7 +398,6 @@ func (m *fsManager) release(sandboxID string, persist bool) error {
 	}
 
 	m.persistMu.Lock()
-	unlockPersist := m.persistMu.Unlock
 	m.mu.Lock()
 	rootfs := m.sandboxRootfs[sandboxID]
 	s3Configs := append([]*runtime.S3Config(nil), m.sandboxS3Mount[sandboxID]...)
@@ -425,11 +424,11 @@ func (m *fsManager) release(sandboxID string, persist bool) error {
 				m.sandboxState[sandboxID] = state
 			}
 			m.mu.Unlock()
-			unlockPersist()
+			m.persistMu.Unlock()
 			return fmt.Errorf("persist released filesystem state for sandbox %s: %w", sandboxID, err)
 		}
 	}
-	unlockPersist()
+	m.persistMu.Unlock()
 
 	if rootfs != nil {
 		rootfs.DecRef()
