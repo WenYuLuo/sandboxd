@@ -30,6 +30,7 @@ import (
 	cmap "github.com/orcaman/concurrent-map/v2"
 
 	"github.com/inclusionAI/sandboxd/config"
+	"github.com/inclusionAI/sandboxd/internal/diagnostics"
 	"github.com/inclusionAI/sandboxd/internal/util"
 	"github.com/inclusionAI/sandboxd/pkg/errord"
 	"github.com/inclusionAI/sandboxd/pkg/store"
@@ -637,8 +638,7 @@ func (m *InterfaceManager) Recycle(id string) error {
 	if m.closed {
 		return errord.ErrUnavailable
 	}
-	m.leaseMu.Lock()
-	defer m.leaseMu.Unlock()
+	defer diagnostics.Lock(&m.leaseMu, "network.recycle")()
 
 	if !m.usingInterfaces.Has(id) {
 		return nil
@@ -670,8 +670,7 @@ func (m *InterfaceManager) Deactivate(id string) error {
 	if m.closed {
 		return errord.ErrUnavailable
 	}
-	m.leaseMu.Lock()
-	defer m.leaseMu.Unlock()
+	defer diagnostics.Lock(&m.leaseMu, "network.deactivate")()
 
 	if !m.usingInterfaces.Has(id) {
 		return nil
@@ -800,8 +799,7 @@ func (m *InterfaceManager) store() error {
 	if m.db == nil {
 		return nil
 	}
-	m.storeMu.Lock()
-	defer m.storeMu.Unlock()
+	defer diagnostics.Lock(&m.storeMu, "network.persist")()
 	start := time.Now()
 	defer func() {
 		logrus.Debugf("store network interface %v using id cost: %v ms", m.usingInterfaces.Count(), time.Since(start).Milliseconds())

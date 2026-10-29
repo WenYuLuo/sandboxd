@@ -24,6 +24,7 @@ import (
 
 	runtime "github.com/inclusionAI/sandboxd/api/runtime/v1"
 	"github.com/inclusionAI/sandboxd/config"
+	"github.com/inclusionAI/sandboxd/internal/diagnostics"
 	"github.com/inclusionAI/sandboxd/internal/langrtmanager"
 	"github.com/inclusionAI/sandboxd/pkg/errord"
 	imageapi "github.com/inclusionAI/sandboxd/pkg/imagemanager/api"
@@ -174,8 +175,7 @@ func (m *fsManager) Commit(sandboxID string, prepared *preparedFS) error {
 		return fmt.Errorf("encode filesystem state for sandbox %s: %w", sandboxID, err)
 	}
 
-	m.persistMu.Lock()
-	defer m.persistMu.Unlock()
+	defer diagnostics.Lock(&m.persistMu, "fs.commit")()
 	m.mu.Lock()
 	if _, exists := m.sandboxState[sandboxID]; exists {
 		m.mu.Unlock()
@@ -397,7 +397,7 @@ func (m *fsManager) release(sandboxID string, persist bool) error {
 		return nil
 	}
 
-	m.persistMu.Lock()
+	unlockPersist := diagnostics.Lock(&m.persistMu, "fs.release")
 	m.mu.Lock()
 	rootfs := m.sandboxRootfs[sandboxID]
 	s3Configs := append([]*runtime.S3Config(nil), m.sandboxS3Mount[sandboxID]...)
@@ -424,11 +424,11 @@ func (m *fsManager) release(sandboxID string, persist bool) error {
 				m.sandboxState[sandboxID] = state
 			}
 			m.mu.Unlock()
-			m.persistMu.Unlock()
+			unlockPersist()
 			return fmt.Errorf("persist released filesystem state for sandbox %s: %w", sandboxID, err)
 		}
 	}
-	m.persistMu.Unlock()
+	unlockPersist()
 
 	if rootfs != nil {
 		rootfs.DecRef()

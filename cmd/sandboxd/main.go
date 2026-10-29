@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/inclusionAI/sandboxd/config"
+	"github.com/inclusionAI/sandboxd/internal/diagnostics"
 	_ "github.com/inclusionAI/sandboxd/internal/metrics"
 	"github.com/inclusionAI/sandboxd/internal/server"
 	"github.com/inclusionAI/sandboxd/internal/trace"
@@ -180,6 +181,7 @@ func setGLogLevel() error {
 
 func metricsMux() *http.ServeMux {
 	mux := http.NewServeMux()
+	mux.HandleFunc("/debug/lifecycle-timing", diagnostics.ServeHTTP)
 	mux.Handle("/metrics", promhttp.Handler())
 	return mux
 }

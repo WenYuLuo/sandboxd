@@ -22,6 +22,7 @@ import (
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/rlimit"
+	"github.com/inclusionAI/sandboxd/internal/diagnostics"
 	"github.com/inclusionAI/sandboxd/pkg/errord"
 	"github.com/inclusionAI/sandboxd/pkg/store"
 	"github.com/sirupsen/logrus"
@@ -64,6 +65,9 @@ type persistedEntry struct {
 	Policy       Policy                 `json:"policy"`
 	DomainGrants []persistedDomainGrant `json:"domain_grants,omitempty"`
 	Orphaned     bool                   `json:"orphaned,omitempty"`
+	// True only for a fresh empty policy that has never attempted kernel rules.
+	// Missing in older records means cleanup must conservatively inspect rules.
+	KernelPolicyAbsent bool `json:"kernel_policy_absent,omitempty"`
 }
 
 type persistedDomainGrant struct {
@@ -217,7 +221,10 @@ const (
 )
 
 type Manager struct {
-	mu sync.RWMutex
+	mu          sync.RWMutex
+	lifecycleMu sync.RWMutex
+	closed      bool
+	removals    map[string]*removal
 
 	store         store.DbStore
 	bridgeIP      net.IP
@@ -271,6 +278,9 @@ func New(config Config) (*Manager, error) {
 	failed := true
 	defer func() {
 		if failed {
+			if manager.iptables != nil && manager.iptables.conntrack != nil {
+				manager.iptables.conntrack.Close()
+			}
 			_ = manager.objects.close()
 			if manager.iptables != nil && len(manager.entries) == 0 {
 				_ = manager.iptables.close()
@@ -377,6 +387,7 @@ func (m *Manager) loadState() error {
 }
 
 func (m *Manager) persistLocked() error {
+	defer diagnostics.Start("acl.persist")()
 	if m.store == nil {
 		return nil
 	}
@@ -388,8 +399,13 @@ func (m *Manager) persistLocked() error {
 }
 
 func (m *Manager) Restore(active map[string]Binding) error {
+	m.lifecycleMu.Lock()
+	defer m.lifecycleMu.Unlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.closed {
+		return errord.ErrUnavailable
+	}
 	resolved := make(map[string]persistedEntry, len(active))
 	entryRestoreOld := make(map[string]persistedEntry, len(active))
 	for sandboxID, binding := range active {
@@ -460,8 +476,12 @@ func (m *Manager) Restore(active map[string]Binding) error {
 }
 
 func (m *Manager) Register(binding Binding, policy Policy) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.lifecycleMu.RLock()
+	defer m.lifecycleMu.RUnlock()
+	defer diagnostics.Lock(&m.mu, "acl.register")()
+	if m.closed {
+		return errord.ErrUnavailable
+	}
 	if binding.SandboxID == "" || binding.IP.To4() == nil || binding.HostVeth == "" {
 		return fmt.Errorf("network ACL binding requires sandbox ID, IPv4 address, and host endpoint")
 	}
@@ -478,6 +498,9 @@ func (m *Manager) Register(binding Binding, policy Policy) error {
 		if !conflicts {
 			continue
 		}
+		if m.removals[sandboxID] != nil {
+			return fmt.Errorf("network ACL endpoint is being cleaned: %w", errord.ErrUnavailable)
+		}
 		if !existing.Orphaned {
 			return fmt.Errorf("network ACL state for sandbox %s conflicts with active sandbox %s", binding.SandboxID, sandboxID)
 		}
@@ -491,11 +514,12 @@ func (m *Manager) Register(binding Binding, policy Policy) error {
 		generation = 1
 	}
 	entry := persistedEntry{
-		IP:         binding.IP.String(),
-		HostVeth:   binding.HostVeth,
-		IfIndex:    link.Attrs().Index,
-		Generation: generation,
-		Policy:     policy,
+		IP:                 binding.IP.String(),
+		HostVeth:           binding.HostVeth,
+		IfIndex:            link.Attrs().Index,
+		Generation:         generation,
+		Policy:             policy,
+		KernelPolicyAbsent: policy.Empty(),
 	}
 	m.entries[binding.SandboxID] = entry
 	m.sourceIndex[entry.IP] = binding.SandboxID
@@ -514,14 +538,20 @@ func (m *Manager) Register(binding Binding, policy Policy) error {
 }
 
 func (m *Manager) SetPolicy(sandboxID string, policy Policy) error {
+	m.lifecycleMu.RLock()
+	defer m.lifecycleMu.RUnlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	old, ok := m.entries[sandboxID]
+	if m.closed {
+		return errord.ErrUnavailable
+	}
 	if !ok || old.Orphaned {
 		return errord.ErrNotFound
 	}
 	next := old
 	next.Policy = policy
+	next.KernelPolicyAbsent = false
 	next.DomainGrants = nil
 	next.Generation++
 	if next.Generation == 0 {
@@ -533,6 +563,8 @@ func (m *Manager) SetPolicy(sandboxID string, policy Policy) error {
 		return fmt.Errorf("persist network ACL update for %s: %w", sandboxID, err)
 	}
 	if err := m.applyLocked(old, next); err != nil {
+		// A failed attempt or rollback may have left barriers/rules behind.
+		old.KernelPolicyAbsent = false
 		m.entries[sandboxID] = old
 		rollbackErr := m.rollbackApplyLocked(old, next)
 		persistErr := m.persistLocked()
@@ -557,16 +589,6 @@ func wrapOptionalError(message string, err error) error {
 		return nil
 	}
 	return fmt.Errorf("%s: %w", message, err)
-}
-
-func (m *Manager) Remove(sandboxID string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	entry, ok := m.entries[sandboxID]
-	if !ok {
-		return nil
-	}
-	return m.reconcileOrphansLocked(map[string]persistedEntry{sandboxID: entry})
 }
 
 // reconcileOrphansLocked persists cleanup intent before changing kernel state.
@@ -648,15 +670,8 @@ func (m *Manager) reconcileOrphansLocked(candidates map[string]persistedEntry) e
 }
 
 func (m *Manager) cleanupEntryLocked(sandboxID string, entry persistedEntry) error {
-	for otherID, other := range m.entries {
-		if otherID == sandboxID || other.Orphaned || other.IfIndex != entry.IfIndex {
-			continue
-		}
-		return fmt.Errorf(
-			"refusing cleanup of ifindex %d owned by active sandbox %s",
-			entry.IfIndex,
-			otherID,
-		)
+	if err := m.checkCleanupOwnershipLocked(sandboxID, entry); err != nil {
+		return err
 	}
 	if m.iptables != nil {
 		return m.iptables.cleanup(entry)
@@ -1605,8 +1620,14 @@ func (m *Manager) deleteConnectionsForPeersLocked(ifindex int, generation uint64
 }
 
 func (m *Manager) Close() error {
+	m.lifecycleMu.Lock()
+	defer m.lifecycleMu.Unlock()
 	var errs []error
-	m.grantStopOnce.Do(func() { close(m.grantStop) })
+	m.grantStopOnce.Do(func() {
+		if m.grantStop != nil {
+			close(m.grantStop)
+		}
+	})
 	m.grantWG.Wait()
 	if m.dns != nil {
 		if err := m.dns.close(); err != nil {
@@ -1615,6 +1636,13 @@ func (m *Manager) Close() error {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.closed {
+		return nil
+	}
+	m.closed = true
+	if m.iptables != nil && m.iptables.conntrack != nil {
+		m.iptables.conntrack.Close()
+	}
 	if err := m.objects.close(); err != nil {
 		errs = append(errs, err)
 	}

@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/coreos/go-iptables/iptables"
+	"github.com/inclusionAI/sandboxd/internal/diagnostics"
 	"github.com/sirupsen/logrus"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
@@ -82,6 +83,7 @@ type iptablesBackend struct {
 	bridgeIP             net.IP
 	ipset                ipsetClient
 	deleteConntrackForIP func(net.IP) error
+	conntrack            *conntrackBatcher
 }
 
 type ipsetClient interface {
@@ -136,6 +138,7 @@ func newIPTablesBackend(bridgeIP net.IP) (*iptablesBackend, error) {
 	if err := backend.ensureDropBarrier(); err != nil {
 		return nil, err
 	}
+	backend.conntrack = newConntrackBatcher(deleteConntrackEndpoints)
 	return backend, nil
 }
 
@@ -380,6 +383,9 @@ func iptablesChainNames(ip net.IP, generation uint64) (stableEgress, stableIngre
 }
 
 func (b *iptablesBackend) apply(old, next persistedEntry) error {
+	if old.KernelPolicyAbsent && next.KernelPolicyAbsent && next.Policy.Empty() && next.Generation == 0 {
+		return nil
+	}
 	if next.Policy.Empty() {
 		if old.IfIndex == 0 {
 			return nil
@@ -1402,6 +1408,12 @@ func (b *iptablesBackend) removeEndpointHooks(
 }
 
 func (b *iptablesBackend) cleanup(entry persistedEntry) error {
+	defer diagnostics.Start("acl.iptables_cleanup")()
+	// No rule has ever been installed for this durable incarnation. Conntrack
+	// still must be purged before the IP/TAP can be returned to the pool.
+	if entry.KernelPolicyAbsent && entry.Policy.Empty() && entry.Generation == 0 {
+		return b.deleteConntrack(net.ParseIP(entry.IP).To4())
+	}
 	ip := net.ParseIP(entry.IP).To4()
 	if ip == nil {
 		return fmt.Errorf("iptables ACL sandbox IP %q is not IPv4", entry.IP)
@@ -1461,6 +1473,9 @@ func (b *iptablesBackend) cleanup(entry persistedEntry) error {
 }
 
 func (b *iptablesBackend) close() error {
+	if b.conntrack != nil {
+		b.conntrack.Close()
+	}
 	chains, err := b.client.ListChains(filterTable)
 	if err != nil {
 		return err
@@ -1485,8 +1500,12 @@ func (b *iptablesBackend) deleteChain(chain string) error {
 }
 
 func (b *iptablesBackend) deleteConntrack(ip net.IP) error {
+	defer diagnostics.Start("acl.conntrack_delete")()
 	if b.deleteConntrackForIP != nil {
 		return b.deleteConntrackForIP(ip)
+	}
+	if b.conntrack != nil {
+		return b.conntrack.Delete(ip)
 	}
 	// NAT rewrites one side of the reply tuple, so requiring the sandbox IP in
 	// both original and reply directions can miss real standalone flows. Delete
