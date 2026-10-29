@@ -24,7 +24,6 @@ import (
 	"github.com/containerd/typeurl/v2"
 	"github.com/gogo/protobuf/types"
 	"github.com/golang/protobuf/proto"
-	"github.com/inclusionAI/sandboxd/internal/diagnostics"
 	"github.com/inclusionAI/sandboxd/pkg/errord"
 	bolt "go.etcd.io/bbolt"
 	"google.golang.org/protobuf/types/known/anypb"
@@ -42,10 +41,12 @@ var _ DbStore = &BboltStoreImp{}
 // BboltStoreImp owns one database handle. Close drains active transactions and
 // prevents subsequent operations from reopening the file.
 type BboltStoreImp struct {
-	path   string
-	mu     sync.RWMutex
-	db     *bolt.DB
-	closed bool
+	path       string
+	mu         sync.RWMutex
+	db         *bolt.DB
+	closed     bool
+	batchOnce  sync.Once
+	batchSlots chan struct{}
 }
 
 // NewStoreImp retains lazy construction for callers that handle I/O errors on
@@ -82,13 +83,13 @@ func (f *BboltStoreImp) withDB(fn func(*bolt.DB) error) error {
 				f.mu.Unlock()
 				return err
 			}
-			endOpen := diagnostics.Start("store.open")
 			db, err := bolt.Open(f.path, 0777, &bolt.Options{Timeout: time.Second})
-			endOpen()
 			if err != nil {
 				f.mu.Unlock()
 				return err
 			}
+			db.MaxBatchDelay = time.Millisecond
+			db.MaxBatchSize = 128
 			f.db = db
 		}
 		f.mu.Unlock()
@@ -109,11 +110,9 @@ func (f *BboltStoreImp) Close() error {
 }
 
 func (f *BboltStoreImp) update(fn func(*bolt.Tx) error) error {
-	defer diagnostics.Start("store.write")()
 	return f.withDB(func(db *bolt.DB) error { return db.Update(fn) })
 }
 func (f *BboltStoreImp) view(fn func(*bolt.Tx) error) error {
-	defer diagnostics.Start("store.read")()
 	return f.withDB(func(db *bolt.DB) error { return db.View(fn) })
 }
 

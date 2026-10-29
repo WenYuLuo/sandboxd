@@ -26,7 +26,6 @@ import (
 	"time"
 
 	"github.com/coreos/go-iptables/iptables"
-	"github.com/inclusionAI/sandboxd/internal/diagnostics"
 	"github.com/sirupsen/logrus"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
@@ -1408,7 +1407,6 @@ func (b *iptablesBackend) removeEndpointHooks(
 }
 
 func (b *iptablesBackend) cleanup(entry persistedEntry) error {
-	defer diagnostics.Start("acl.iptables_cleanup")()
 	// No rule has ever been installed for this durable incarnation. Conntrack
 	// still must be purged before the IP/TAP can be returned to the pool.
 	if entry.KernelPolicyAbsent && entry.Policy.Empty() && entry.Generation == 0 {
@@ -1500,7 +1498,6 @@ func (b *iptablesBackend) deleteChain(chain string) error {
 }
 
 func (b *iptablesBackend) deleteConntrack(ip net.IP) error {
-	defer diagnostics.Start("acl.conntrack_delete")()
 	if b.deleteConntrackForIP != nil {
 		return b.deleteConntrackForIP(ip)
 	}

@@ -15,7 +15,6 @@
 package networkacl
 
 import (
-	"encoding/json"
 	"errors"
 	"github.com/inclusionAI/sandboxd/pkg/errord"
 	"net"
@@ -117,11 +116,9 @@ func TestFailedCleanupSurvivesStoreRestartAndReconciles(t *testing.T) {
 	require.True(t, m2.entries["old"].Orphaned)
 	require.NoError(t, m2.Restore(map[string]Binding{}))
 	require.Empty(t, m2.entries)
-	raw, err := recovered.LoadRaw(stateStoreKey)
+	records, err := recovered.LoadRecords(entryStoreKey)
 	require.NoError(t, err)
-	var state persistedState
-	require.NoError(t, json.Unmarshal(raw, &state))
-	require.Empty(t, state.Entries)
+	require.Empty(t, records)
 }
 
 func TestRemovalFinalWriteFailureKeepsOrphanAndUnrelatedEntry(t *testing.T) {

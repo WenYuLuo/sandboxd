@@ -31,7 +31,6 @@ import (
 
 	runtime "github.com/inclusionAI/sandboxd/api/runtime/v1"
 	"github.com/inclusionAI/sandboxd/config"
-	"github.com/inclusionAI/sandboxd/internal/diagnostics"
 	"github.com/inclusionAI/sandboxd/internal/metrics"
 	"github.com/inclusionAI/sandboxd/internal/trace"
 	"github.com/inclusionAI/sandboxd/internal/util"
@@ -192,7 +191,6 @@ func (h *sandboxService) startSandboxRuntime(
 	runtimeName string,
 	startConfig svc.StartConfig,
 ) (err error) {
-	defer diagnostics.Start("lifecycle.runtime_start")()
 	traceID, spanID := trace.GetContextID(ctx)
 	start := time.Now()
 	defer func() {
@@ -257,7 +255,6 @@ func (h *sandboxService) startSandboxRuntime(
 }
 
 func (h *sandboxService) deleteSandboxRuntime(ctx context.Context, sandboxID string) (err error) {
-	defer diagnostics.Start("lifecycle.delete")()
 	traceID, spanID := trace.GetContextID(ctx)
 	start := time.Now()
 	defer func() {
@@ -1218,7 +1215,6 @@ func startFailure(ctx context.Context, stage string, err error) error {
 }
 
 func (h *sandboxService) Start(ctx context.Context, request *runtime.StartRequest) (*runtime.StartResponse, error) {
-	defer diagnostics.Start("lifecycle.start")()
 	if request == nil {
 		err := fmt.Errorf("start request is nil")
 		return &runtime.StartResponse{Code: -1, Message: err.Error()}, err
