@@ -49,12 +49,14 @@ func (s *housekeepingWriteBarrier) UpdateSync(UpdateFunc) error {
 
 func TestHousekeepingConcurrentDeletePreservesReadiness(t *testing.T) {
 	for _, tc := range []struct {
-		name       string
-		deleteRoot bool
-		writeErr   error
-		wantReady  bool
+		name          string
+		deleteRoot    bool
+		rootReappears bool
+		writeErr      error
+		wantReady     bool
 	}{
 		{name: "deleted sandbox", deleteRoot: true, wantReady: true},
+		{name: "retired sandbox with visible root", deleteRoot: true, rootReappears: true, wantReady: true},
 		{name: "missing temporary file with live root", wantReady: false},
 		{name: "permission error during delete", deleteRoot: true, writeErr: os.ErrPermission, wantReady: false},
 	} {
@@ -82,6 +84,12 @@ func TestHousekeepingConcurrentDeletePreservesReadiness(t *testing.T) {
 			case temporary := <-status.staged:
 				if tc.deleteRoot {
 					m.Delete(id)
+					if tc.rootReappears {
+						// The old object is retired even when its path is visible:
+						// RemoveAll can unlink a temporary file before rmdir, and
+						// the path may also be recreated after a completed delete.
+						require.NoError(t, os.MkdirAll(root, 0700))
+					}
 				} else {
 					require.NoError(t, os.Remove(temporary))
 				}
@@ -99,8 +107,33 @@ func TestHousekeepingConcurrentDeletePreservesReadiness(t *testing.T) {
 			require.True(t, m.sandboxes.Has(peer))
 			require.True(t, m.monitorStopChan.Has(peer))
 			if tc.deleteRoot {
-				require.NoDirExists(t, root)
+				if tc.rootReappears {
+					require.DirExists(t, root)
+				} else {
+					require.NoDirExists(t, root)
+				}
 				require.False(t, m.monitorStopChan.Has(id))
+			}
+			if tc.rootReappears {
+				// A new object at the same ID/path must not inherit retirement.
+				replacement := &housekeepingWriteBarrier{path: filepath.Join(root, "status"),
+					staged: make(chan string, 1), resume: make(chan struct{})}
+				defer close(replacement.resume)
+				m.sandboxes.Set(id, &Sandbox{Metadata: &api.SandboxMetadata{ID: id, RuntimeHandler: "runsc"}, PATH: root, Status: replacement})
+				go m.housekeeping()
+				select {
+				case temporary := <-replacement.staged:
+					require.NoError(t, os.Remove(temporary))
+				case <-time.After(5 * time.Second):
+					t.Fatal("replacement did not reach persistence")
+				}
+				replacement.resume <- struct{}{}
+				select {
+				case ready := <-health:
+					require.False(t, ready, "replacement persistence failure must affect readiness")
+				case <-time.After(5 * time.Second):
+					t.Fatal("replacement housekeeping did not finish")
+				}
 			}
 		})
 	}
